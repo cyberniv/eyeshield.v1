@@ -1,6 +1,7 @@
 package com.example.myapplication4
 
 import android.annotation.SuppressLint
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -18,6 +19,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -141,28 +143,69 @@ data class RecentScanInfo(val url: String, val verdict: String, val time: String
 // ═════════════════════════════════════════════
 
 class MainActivity : ComponentActivity() {
+    private var pendingExternalUrl by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingExternalUrl = extractBrowsableUrl(intent)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = ObsidianColors.Background)) {
                 Surface(modifier = Modifier.fillMaxSize(), color = ObsidianColors.Background) {
-                    MainApp()
+                    MainApp(
+                        externalUrl = pendingExternalUrl,
+                        onExternalUrlConsumed = { pendingExternalUrl = null }
+                    )
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingExternalUrl = extractBrowsableUrl(intent)
+    }
+
+    private fun extractBrowsableUrl(intent: Intent?): String? {
+        val intentUri = intent?.data ?: return null
+        if (intent.action != Intent.ACTION_VIEW) return null
+
+        val scheme = intentUri.scheme?.lowercase() ?: return null
+        return if (scheme == "http" || scheme == "https") intentUri.toString() else null
+    }
 }
 
 @Composable
-fun MainApp() {
+fun MainApp(externalUrl: String? = null, onExternalUrlConsumed: () -> Unit = {}) {
     val navController = rememberNavController()
     val viewModel: SecurityViewModel = viewModel()
+    val startSecureScan: (String) -> Unit = remember(navController, viewModel) {
+        { rawUrl ->
+            val normalizedUrl = rawUrl.trim()
+            if (normalizedUrl.isNotBlank()) {
+                viewModel.scanUrl(normalizedUrl)
+                navController.navigate("analysis") {
+                    launchSingleTop = true
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(externalUrl) {
+        val url = externalUrl ?: return@LaunchedEffect
+        startSecureScan(url)
+        onExternalUrlConsumed()
+    }
     
     Box(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
         NavHost(navController = navController, startDestination = "home") {
             composable("home") {
-                HomeScreenObsidian(navController = navController, viewModel = viewModel)
+                HomeScreenObsidian(
+                    navController = navController,
+                    viewModel = viewModel,
+                    onScanRequested = startSecureScan
+                )
             }
             composable("analysis") {
                 AnalysisScreenObsidian(navController = navController, viewModel = viewModel)
@@ -190,148 +233,502 @@ fun MainApp() {
 // ═════════════════════════════════════════════
 
 @Composable
-fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewModel) {
+fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewModel, onScanRequested: (String) -> Unit) {
     var urlInput by remember { mutableStateOf("") }
-    val scanState by viewModel.scanState.observeAsState(ScanState.Idle)
+    var homeMessage by remember { mutableStateOf<String?>(null) }
+    var showTipCard by remember { mutableStateOf(true) }
+    val context = LocalContext.current
+    val clipboardManager = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val recentScans by viewModel.recentScans.observeAsState(emptyList())
-    
-    LaunchedEffect(scanState) {
-        if (scanState is ScanState.Success) {
-            navController.navigate("analysis")
+    val recentItems = remember(recentScans) { recentScans.take(3) }
+    val lastVisitedSite = recentItems.firstOrNull()?.url
+
+    LaunchedEffect(recentItems.isNotEmpty()) {
+        if (recentItems.isNotEmpty()) {
+            showTipCard = false
         }
     }
-    
+
     Scaffold(
         topBar = { OKTopBar(navController) },
         bottomBar = { OKBottomNav(navController) },
         containerColor = ObsidianColors.Background
     ) { innerPadding ->
-        if (scanState is ScanState.Loading) {
-            Box(modifier = Modifier.padding(innerPadding)) { LoadingScreenObsidian() }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                item {
-                    Spacer(modifier = Modifier.height(48.dp))
-                    AnimatedShieldHero()
-                    Spacer(modifier = Modifier.height(24.dp))
-                    
-                    // Search & Scan
-                    Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.6f)).border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.2f), RoundedCornerShape(16.dp)).padding(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Language, null, tint = ObsidianColors.Primary, modifier = Modifier.padding(start = 12.dp))
-                            BasicTextField(
-                                value = urlInput,
-                                onValueChange = { urlInput = it },
-                                modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
-                                textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
-                                decorationBox = { innerTextField ->
-                                    if (urlInput.isEmpty()) Text("Enter website URL", color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.5f))
-                                    innerTextField()
-                                }
-                            )
-                            Button(
-                                onClick = { if (urlInput.isNotBlank()) viewModel.scanUrl(urlInput) },
-                                shape = RoundedCornerShape(100.dp),
-                                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
-                                modifier = Modifier.background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp)),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
-                            ) {
-                                Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(20.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Scan Now", color = Color.Black, fontWeight = FontWeight.Bold)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            item {
+                Spacer(modifier = Modifier.height(48.dp))
+                AnimatedShieldHero()
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.6f)).border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.2f), RoundedCornerShape(16.dp)).padding(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Language, null, tint = ObsidianColors.Primary, modifier = Modifier.padding(start = 12.dp))
+                        BasicTextField(
+                            value = urlInput,
+                            onValueChange = { urlInput = it },
+                            modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                            textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
+                            decorationBox = { innerTextField ->
+                                if (urlInput.isEmpty()) Text("Enter or paste URL", color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.5f))
+                                innerTextField()
                             }
+                        )
+                        Button(
+                            onClick = {
+                                val enteredUrl = urlInput.trim()
+                                if (enteredUrl.isNotBlank()) {
+                                    onScanRequested(enteredUrl)
+                                }
+                            },
+                            shape = RoundedCornerShape(100.dp),
+                            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
+                            modifier = Modifier.background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp)),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
+                        ) {
+                            Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Analyze URL", color = Color.Black, fontWeight = FontWeight.Bold)
                         }
                     }
-                    
-                    if (scanState is ScanState.Error) {
-                        Text((scanState as ScanState.Error).message, color = ObsidianColors.Error, modifier = Modifier.padding(top = 16.dp))
-                    }
-                    
-                    Spacer(modifier = Modifier.height(64.dp))
-                    
-                    // Recent Intelligence
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                        Column {
-                            Text("Recent Intelligence", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp)
-                            Text("Last verification signatures detected", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
-                        }
-                        Text("View Ledger", color = ObsidianColors.Primary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { navController.navigate("scans") })
-                    }
-                    Spacer(modifier = Modifier.height(24.dp))
-                }
-                
-                items(recentScans) { scan ->
-                    RecentIntelligenceItem(scan)
-                    Spacer(modifier = Modifier.height(12.dp))
                 }
 
-                item {
-                    Spacer(modifier = Modifier.height(120.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    QuickActionButton(
+                        title = "Scan Copied Link",
+                        subtitle = "Instantly check copied URLs",
+                        icon = Icons.Default.ContentPasteSearch,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            val clipboardText = clipboardManager?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
+                            if (clipboardText.isNotBlank()) {
+                                homeMessage = null
+                                onScanRequested(clipboardText)
+                            } else {
+                                homeMessage = "Clipboard does not contain a URL"
+                            }
+                        }
+                    )
+                    QuickActionButton(
+                        title = "Scan Recent Site",
+                        subtitle = "Analyze your last visited website",
+                        icon = Icons.Default.History,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            if (!lastVisitedSite.isNullOrBlank()) {
+                                homeMessage = null
+                                onScanRequested(lastVisitedSite)
+                            } else {
+                                homeMessage = "No recent site available yet"
+                            }
+                        }
+                    )
                 }
+
+                AnimatedVisibility(visible = homeMessage != null, enter = fadeIn(), exit = fadeOut()) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = ObsidianColors.SurfaceContainerLow,
+                        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.2f))
+                    ) {
+                        Text(
+                            text = homeMessage.orEmpty(),
+                            color = ObsidianColors.OnSurfaceVariant,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+
+                AnimatedVisibility(visible = showTipCard, enter = fadeIn(), exit = fadeOut()) {
+                    Column {
+                        Spacer(modifier = Modifier.height(18.dp))
+                        TipCard(
+                            title = "Security Tip",
+                            message = "Avoid unknown links. Always verify the source before opening.",
+                            onDismiss = { showTipCard = false }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+                RecentIntelligenceHeader(onViewLedger = { navController.navigate("scans") })
+                Spacer(modifier = Modifier.height(18.dp))
+            }
+
+            if (recentItems.isEmpty()) {
+                item {
+                    EmptyScansState(
+                        onCardClick = { navController.navigate("scans") },
+                        onScanNow = {
+                            homeMessage = "Enter or paste a URL above to start scanning"
+                        }
+                    )
+                }
+            } else {
+                items(recentItems) { scan ->
+                    RecentIntelligenceItem(scan = scan, onClick = { navController.navigate("scans") })
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(84.dp))
             }
         }
     }
 }
 
 @Composable
-fun RecentIntelligenceItem(scan: RecentScanInfo) {
+fun RecentIntelligenceHeader(onViewLedger: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                "Recent Scans",
+                fontSize = 26.sp,
+                fontWeight = FontWeight.SemiBold,
+                style = TextStyle(
+                    brush = Brush.horizontalGradient(
+                        listOf(
+                            Color.White,
+                            ObsidianColors.Primary.copy(alpha = 0.92f)
+                        )
+                    )
+                )
+            )
+            Text("Your latest scan results and insights", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+        }
+        Surface(
+            shape = RoundedCornerShape(100.dp),
+            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f),
+            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.16f)),
+            shadowElevation = 6.dp,
+            modifier = Modifier.clickable(onClick = onViewLedger)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(Icons.Default.Timeline, null, tint = ObsidianColors.Primary, modifier = Modifier.size(14.dp))
+                Text("View Ledger", color = ObsidianColors.Primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
+fun RecentIntelligenceItem(scan: RecentScanInfo, onClick: () -> Unit) {
     val color = when (scan.verdict) {
         "SAFE" -> ObsidianColors.Safe
         "WARNING" -> ObsidianColors.Warning
         else -> ObsidianColors.Error
     }
-    val icon = when(scan.verdict) {
+    val icon = when (scan.verdict) {
         "SAFE" -> Icons.Default.Public
         "WARNING" -> Icons.Default.Warning
         else -> Icons.Default.Dangerous
     }
-    Row(
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.985f else 1f, tween(140), label = "recent_intelligence_scale")
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .background(ObsidianColors.SurfaceContainerLow, RoundedCornerShape(12.dp))
-            .border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+            .scale(scale),
+        shape = RoundedCornerShape(20.dp),
+        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.68f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.20f)),
+        shadowElevation = 12.dp
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Box(modifier = Modifier.size(48.dp).background(ObsidianColors.SurfaceContainerHigh, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
-                Icon(icon, null, tint = color, modifier = Modifier.size(24.dp))
-            }
-            Column {
-                Text(scan.url, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Scanned ${scan.time}", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
-            }
-        }
-        Column(horizontalAlignment = Alignment.End) {
-            Text("AI CONFIDENCE", fontSize = 10.sp, color = ObsidianColors.OnSurfaceVariant, fontWeight = FontWeight.Bold)
-            Text(scan.confidence, fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.height(4.dp))
-            Surface(color = color.copy(alpha = 0.1f), border = BorderStroke(1.dp, color.copy(alpha = 0.3f)), shape = RoundedCornerShape(100.dp)) {
-                Text(scan.verdict, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            color.copy(alpha = 0.12f),
+                            ObsidianColors.SurfaceContainerLow.copy(alpha = 0.2f),
+                            Color.Transparent
+                        )
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 15.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(modifier = Modifier.size(46.dp).background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.8f), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                        Icon(icon, null, tint = color, modifier = Modifier.size(21.dp))
+                    }
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Text(displaySiteLabel(scan.url), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(modifier = Modifier.size(8.dp).background(color, CircleShape))
+                            Text(scan.verdict.lowercase().replaceFirstChar { it.uppercase() }, color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            Text(scan.time, color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+                        }
+                    }
+                }
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        color = color.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(100.dp),
+                        border = BorderStroke(1.dp, color.copy(alpha = 0.28f))
+                    ) {
+                        Text(
+                            scan.verdict.lowercase().replaceFirstChar { it.uppercase() },
+                            color = color,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                    Text(scan.confidence, fontSize = 13.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
 }
 
 @Composable
-fun StatChip(label: String, icon: ImageVector, color: Color) {
+fun QuickActionButton(title: String, subtitle: String, icon: ImageVector, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(140), label = "quick_action_scale")
+
     Surface(
-        color = ObsidianColors.SurfaceContainer,
-        shape = RoundedCornerShape(100.dp),
-        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.2f))
+        modifier = modifier.scale(scale),
+        shape = RoundedCornerShape(18.dp),
+        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.12f)),
+        shadowElevation = 8.dp
     ) {
-        Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(icon, null, tint = color, modifier = Modifier.size(12.dp))
-            Text(label.uppercase(), fontSize = 8.sp, fontWeight = FontWeight.Bold, color = ObsidianColors.OnSurfaceVariant, letterSpacing = 1.sp)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            ObsidianColors.Primary.copy(alpha = 0.14f),
+                            ObsidianColors.Secondary.copy(alpha = 0.09f),
+                            ObsidianColors.SurfaceContainerLow.copy(alpha = 0.35f)
+                        )
+                    )
+                )
+                .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+                .padding(horizontal = 14.dp, vertical = 14.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.78f), RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(18.dp))
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    Text(subtitle, color = ObsidianColors.OnSurfaceVariant, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2)
+                }
+            }
         }
     }
+}
+
+@Composable
+fun TipCard(title: String, message: String, onDismiss: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.62f),
+        border = BorderStroke(1.dp, ObsidianColors.Warning.copy(alpha = 0.16f)),
+        shadowElevation = 8.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            ObsidianColors.Warning.copy(alpha = 0.14f),
+                            ObsidianColors.Primary.copy(alpha = 0.08f),
+                            Color.Transparent
+                        )
+                    )
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(ObsidianColors.Warning.copy(alpha = 0.16f), RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.TipsAndUpdates, null, tint = ObsidianColors.Warning, modifier = Modifier.size(18.dp))
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(message, color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, null, tint = ObsidianColors.OnSurfaceVariant, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyScansState(onCardClick: () -> Unit, onScanNow: () -> Unit) {
+    val infiniteTransition = rememberInfiniteTransition(label = "empty_state_scan")
+    val ringRotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing), RepeatMode.Restart),
+        label = "empty_state_rotation"
+    )
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(tween(1800, easing = EaseInOutSine), RepeatMode.Reverse),
+        label = "empty_state_pulse"
+    )
+    var visible by remember { mutableStateOf(false) }
+    val cardInteraction = remember { MutableInteractionSource() }
+    val cardPressed by cardInteraction.collectIsPressedAsState()
+    val cardScale by animateFloatAsState(if (cardPressed) 0.992f else 1f, tween(150), label = "empty_state_card_scale")
+    val buttonInteraction = remember { MutableInteractionSource() }
+    val buttonPressed by buttonInteraction.collectIsPressedAsState()
+    val buttonScale by animateFloatAsState(if (buttonPressed) 0.97f else 1f, tween(120), label = "empty_state_button_scale")
+
+    LaunchedEffect(Unit) {
+        visible = true
+    }
+
+    AnimatedVisibility(visible = visible, enter = fadeIn(animationSpec = tween(360))) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .scale(cardScale),
+            shape = RoundedCornerShape(22.dp),
+            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.62f),
+            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.14f)),
+            shadowElevation = 12.dp
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(interactionSource = cardInteraction, indication = null, onClick = onCardClick)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                ObsidianColors.Primary.copy(alpha = 0.10f),
+                                ObsidianColors.Secondary.copy(alpha = 0.06f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(horizontal = 22.dp, vertical = 24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(modifier = Modifier.size(96.dp), contentAlignment = Alignment.Center) {
+                        Canvas(modifier = Modifier.fillMaxSize().rotate(ringRotation)) {
+                            drawArc(
+                                brush = Brush.sweepGradient(
+                                    listOf(
+                                        Color.Transparent,
+                                        ObsidianColors.Primary.copy(alpha = 0.9f),
+                                        ObsidianColors.Secondary.copy(alpha = 0.45f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                startAngle = 0f,
+                                sweepAngle = 110f,
+                                useCenter = false,
+                                style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .scale(pulse)
+                                .background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.78f), CircleShape)
+                                .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.22f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Security, null, tint = ObsidianColors.Primary, modifier = Modifier.size(28.dp))
+                        }
+                    }
+                    Text("No scans yet", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
+                    Text(
+                        "Scan a website to view protection insights and history",
+                        color = ObsidianColors.OnSurfaceVariant,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Button(
+                        onClick = onScanNow,
+                        interactionSource = buttonInteraction,
+                        shape = RoundedCornerShape(100.dp),
+                        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        modifier = Modifier
+                            .scale(buttonScale)
+                            .background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp))
+                    ) {
+                        Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Start Scan", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun displaySiteLabel(url: String): String {
+    val normalized = if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
+    return runCatching {
+        Uri.parse(normalized).host?.removePrefix("www.")?.ifBlank { url } ?: url
+    }.getOrDefault(url)
 }
 
 @Composable
@@ -525,7 +922,7 @@ fun AnimatedShieldHero() {
                         .background(ObsidianColors.Primary, CircleShape)
                 )
                 Text(
-                    text = "System Secure",
+                    text = "All Systems Secure",
                     color = ObsidianColors.OnBackground,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -619,6 +1016,35 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
     val scanState by viewModel.scanState.observeAsState(ScanState.Idle)
     
     when (scanState) {
+        ScanState.Loading -> {
+            Scaffold(
+                containerColor = ObsidianColors.Background,
+                topBar = { OKTopBar(navController) },
+                bottomBar = {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 24.dp)
+                    ) {
+                        PressableOutlinedActionButton(
+                            text = "Cancel",
+                            icon = Icons.Default.Close,
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                viewModel.reset()
+                                navController.navigate("home") {
+                                    popUpTo("home") { inclusive = true }
+                                }
+                            }
+                        )
+                    }
+                }
+            ) { innerPadding ->
+                Box(modifier = Modifier.padding(innerPadding)) {
+                    LoadingScreenObsidian()
+                }
+            }
+        }
         is ScanState.Success -> {
             val success = scanState as ScanState.Success
             val verdict = success.analysis.verdict.uppercase()
@@ -799,8 +1225,78 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
                 }
             }
         }
-        else -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = ObsidianColors.Primary)
+        is ScanState.Error -> {
+            val errorState = scanState as ScanState.Error
+
+            Scaffold(
+                containerColor = ObsidianColors.Background,
+                topBar = { OKTopBar(navController) },
+                bottomBar = {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 24.dp)
+                    ) {
+                        PressableOutlinedActionButton(
+                            text = "Back Home",
+                            icon = Icons.AutoMirrored.Filled.ArrowBack,
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                viewModel.reset()
+                                navController.navigate("home") {
+                                    popUpTo("home") { inclusive = true }
+                                }
+                            }
+                        )
+                    }
+                }
+            ) { innerPadding ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(28.dp),
+                        color = ObsidianColors.SurfaceContainer.copy(alpha = 0.72f),
+                        border = BorderStroke(1.dp, ObsidianColors.Error.copy(alpha = 0.24f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 28.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .background(ObsidianColors.Error.copy(alpha = 0.12f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.ErrorOutline, null, tint = ObsidianColors.Error, modifier = Modifier.size(28.dp))
+                            }
+                            Text("Scan Failed", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                            Text(
+                                errorState.message,
+                                color = ObsidianColors.OnSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 20.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        else -> {
+            LaunchedEffect(Unit) {
+                navController.navigate("home") {
+                    popUpTo("home") { inclusive = true }
+                }
+            }
         }
     }
 }
@@ -1044,53 +1540,955 @@ fun PressableGradientActionButton(
 @Composable
 fun ScansScreenObsidian(navController: NavController, viewModel: SecurityViewModel) {
     val recentScans by viewModel.recentScans.observeAsState(emptyList())
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf("All") }
+    var sortOption by remember { mutableStateOf("Latest") }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+    var selectedScan by remember { mutableStateOf<RecentScanInfo?>(null) }
+
+    val filteredScans = remember(recentScans, searchQuery, selectedFilter, sortOption) {
+        recentScans
+            .filter { scan ->
+                val matchesSearch = searchQuery.isBlank() || displaySiteLabel(scan.url).contains(searchQuery, ignoreCase = true) || scan.url.contains(searchQuery, ignoreCase = true)
+                val matchesFilter = when (selectedFilter) {
+                    "Safe" -> scan.verdict == "SAFE"
+                    "Warning" -> scan.verdict == "WARNING" || scan.verdict == "SUSPICIOUS"
+                    "Dangerous" -> scan.verdict == "DANGEROUS" || scan.verdict == "MALICIOUS"
+                    else -> true
+                }
+                matchesSearch && matchesFilter
+            }
+            .let { scans ->
+                when (sortOption) {
+                    "Risk Level" -> scans.sortedBy { intelligenceRiskRank(it.verdict) }
+                    else -> scans
+                }
+            }
+    }
+
+    val safeCount = recentScans.count { it.verdict == "SAFE" }
+    val blockedCount = recentScans.count { it.verdict == "WARNING" || it.verdict == "SUSPICIOUS" || it.verdict == "DANGEROUS" || it.verdict == "MALICIOUS" }
+    val safeRate = if (recentScans.isEmpty()) 0 else ((safeCount.toFloat() / recentScans.size) * 100).toInt()
+
+    if (selectedScan != null) {
+        val scan = selectedScan!!
+        AlertDialog(
+            onDismissRequest = { selectedScan = null },
+            containerColor = ObsidianColors.SurfaceContainer,
+            title = { Text(displaySiteLabel(scan.url), color = Color.White) },
+            text = { Text("Choose an action for this intelligence record.", color = ObsidianColors.OnSurfaceVariant) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        selectedScan = null
+                        viewModel.scanUrl(scan.url)
+                        navController.navigate("analysis") {
+                            launchSingleTop = true
+                        }
+                    }
+                ) {
+                    Text("Re-scan", color = ObsidianColors.Primary)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            viewModel.removeRecentScan(scan.url)
+                            selectedScan = null
+                        }
+                    ) {
+                        Text("Delete", color = ObsidianColors.Error)
+                    }
+                    TextButton(onClick = { selectedScan = null }) {
+                        Text("Cancel", color = ObsidianColors.OnSurfaceVariant)
+                    }
+                }
+            }
+        )
+    }
+
     Scaffold(topBar = { OKTopBar(navController) }, bottomBar = { OKBottomNav(navController) }, containerColor = ObsidianColors.Background) { innerPadding ->
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 24.dp)) {
-            item { Spacer(modifier = Modifier.height(24.dp)); Text("All Intelligence", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White); Spacer(modifier = Modifier.height(24.dp)) }
-            items(recentScans) { scan -> RecentIntelligenceItem(scan); Spacer(modifier = Modifier.height(16.dp)) }
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 20.dp, bottom = 52.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
+                        Text("All Intelligence", fontSize = 31.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                        Text("Your scan history and protection insights", color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp)
+                    }
+                    Box {
+                        IconButton(onClick = { sortMenuExpanded = true }) {
+                            Icon(Icons.Default.Tune, null, tint = ObsidianColors.Primary)
+                        }
+                        DropdownMenu(
+                            expanded = sortMenuExpanded,
+                            onDismissRequest = { sortMenuExpanded = false },
+                            containerColor = ObsidianColors.SurfaceContainer
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Latest") },
+                                onClick = {
+                                    sortOption = "Latest"
+                                    sortMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Risk Level") },
+                                onClick = {
+                                    sortOption = "Risk Level"
+                                    sortMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.64f),
+                    border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.12f)),
+                    shadowElevation = 8.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(
+                                        ObsidianColors.Primary.copy(alpha = 0.10f),
+                                        ObsidianColors.Secondary.copy(alpha = 0.06f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .background(ObsidianColors.SurfaceContainerHigh, RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Search, null, tint = ObsidianColors.Primary, modifier = Modifier.size(18.dp))
+                        }
+                        BasicTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            modifier = Modifier.weight(1f),
+                            textStyle = TextStyle(color = Color.White, fontSize = 15.sp),
+                            decorationBox = { innerTextField ->
+                                if (searchQuery.isBlank()) {
+                                    Text("Search domain or URL", color = ObsidianColors.OnSurfaceVariant)
+                                }
+                                innerTextField()
+                            }
+                        )
+                    }
+                }
+            }
+
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(listOf("All", "Safe", "Warning", "Dangerous")) { filter ->
+                        FilterChip(
+                            selected = selectedFilter == filter,
+                            onClick = { selectedFilter = filter },
+                            label = { Text(filter) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ObsidianColors.Primary.copy(alpha = 0.18f),
+                                selectedLabelColor = Color.White,
+                                containerColor = ObsidianColors.SurfaceContainerLow,
+                                labelColor = ObsidianColors.OnSurfaceVariant
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = selectedFilter == filter,
+                                borderColor = ObsidianColors.OutlineVariant.copy(alpha = 0.2f),
+                                selectedBorderColor = ObsidianColors.Primary.copy(alpha = 0.22f)
+                            )
+                        )
+                    }
+                }
+            }
+
+            item {
+                IntelligenceStatsBar(
+                    totalScans = recentScans.size,
+                    safeRate = safeRate,
+                    blockedCount = blockedCount,
+                    sortOption = sortOption
+                )
+            }
+
+            if (filteredScans.isEmpty()) {
+                item {
+                    IntelligenceEmptyState(onClick = { navController.navigate("home") })
+                }
+            } else {
+                items(filteredScans.size) { index ->
+                    val scan = filteredScans[index]
+                    IntelligenceHistoryCard(
+                        scan = scan,
+                        index = index,
+                        onClick = {
+                            viewModel.scanUrl(scan.url)
+                            navController.navigate("analysis") {
+                                launchSingleTop = true
+                            }
+                        },
+                        onLongPress = { selectedScan = scan }
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun intelligenceRiskRank(verdict: String): Int = when (verdict) {
+    "DANGEROUS", "MALICIOUS" -> 0
+    "WARNING", "SUSPICIOUS" -> 1
+    else -> 2
+}
+
+@Composable
+fun IntelligenceStatsBar(totalScans: Int, safeRate: Int, blockedCount: Int, sortOption: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.62f),
+        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.18f)),
+        shadowElevation = 8.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IntelligenceMetric("Total scans", totalScans.toString(), ObsidianColors.Primary)
+            IntelligenceMetric("Safe %", "$safeRate%", ObsidianColors.Safe)
+            IntelligenceMetric("Threats blocked", blockedCount.toString(), ObsidianColors.Error)
+            IntelligenceMetric("Sorted", sortOption, ObsidianColors.Warning)
+        }
+    }
+}
+
+@Composable
+fun IntelligenceMetric(label: String, value: String, accent: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(modifier = Modifier.size(7.dp).background(accent, CircleShape))
+        Text(value, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        Text(label, color = ObsidianColors.OnSurfaceVariant, fontSize = 10.sp, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+fun IntelligenceEmptyState(onClick: () -> Unit) {
+    var visible by remember { mutableStateOf(false) }
+    val transition = rememberInfiniteTransition(label = "scans_empty_state")
+    val ringRotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(7600, easing = LinearEasing), RepeatMode.Restart),
+        label = "scans_empty_rotation"
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.95f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(tween(2200, easing = EaseInOutSine), RepeatMode.Reverse),
+        label = "scans_empty_pulse"
+    )
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val buttonScale by animateFloatAsState(if (pressed) 0.97f else 1f, tween(120), label = "scans_empty_button_scale")
+
+    LaunchedEffect(Unit) { visible = true }
+
+    AnimatedVisibility(visible = visible, enter = fadeIn(animationSpec = tween(360))) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.62f),
+            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.16f)),
+            shadowElevation = 12.dp
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onClick)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                ObsidianColors.Primary.copy(alpha = 0.11f),
+                                ObsidianColors.Secondary.copy(alpha = 0.06f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(horizontal = 24.dp, vertical = 24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(modifier = Modifier.size(96.dp), contentAlignment = Alignment.Center) {
+                        Canvas(modifier = Modifier.fillMaxSize().rotate(ringRotation)) {
+                            drawArc(
+                                brush = Brush.sweepGradient(
+                                    listOf(
+                                        Color.Transparent,
+                                        ObsidianColors.Primary.copy(alpha = 0.92f),
+                                        ObsidianColors.Secondary.copy(alpha = 0.4f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                startAngle = 0f,
+                                sweepAngle = 110f,
+                                useCenter = false,
+                                style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .scale(pulse)
+                                .background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.85f), CircleShape)
+                                .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.22f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Security, null, tint = ObsidianColors.Primary, modifier = Modifier.size(28.dp))
+                        }
+                    }
+                    Text("No scans yet", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Scan a website to view protection insights and history",
+                        color = ObsidianColors.OnSurfaceVariant,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Button(
+                        onClick = onClick,
+                        interactionSource = interactionSource,
+                        shape = RoundedCornerShape(100.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp),
+                        modifier = Modifier.scale(buttonScale).background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp))
+                    ) {
+                        Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Start Scan", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun IntelligenceHistoryCard(scan: RecentScanInfo, index: Int, onClick: () -> Unit, onLongPress: () -> Unit) {
+    val color = when (scan.verdict) {
+        "SAFE" -> ObsidianColors.Safe
+        "WARNING", "SUSPICIOUS" -> ObsidianColors.Warning
+        else -> ObsidianColors.Error
+    }
+    val statusLabel = when (scan.verdict) {
+        "SAFE" -> "Safe"
+        "WARNING", "SUSPICIOUS" -> "Warning"
+        else -> "Dangerous"
+    }
+    val icon = when (scan.verdict) {
+        "SAFE" -> Icons.Default.Verified
+        "WARNING", "SUSPICIOUS" -> Icons.Default.WarningAmber
+        else -> Icons.Default.GppBad
+    }
+    var visible by remember { mutableStateOf(false) }
+    val transition = rememberInfiniteTransition(label = "intelligence_card_icon_$index")
+    val pulse by transition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.04f,
+        animationSpec = infiniteRepeatable(tween(2400, easing = EaseInOutSine), RepeatMode.Reverse),
+        label = "intelligence_card_pulse_$index"
+    )
+
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay((index * 45).toLong())
+        visible = true
+    }
+
+    AnimatedVisibility(visible = visible, enter = fadeIn(animationSpec = tween(280))) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.68f),
+            border = BorderStroke(1.dp, color.copy(alpha = 0.22f)),
+            shadowElevation = 10.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(onClick = onClick, onLongClick = onLongPress)
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                color.copy(alpha = 0.14f),
+                                ObsidianColors.SurfaceContainerLow.copy(alpha = 0.26f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .scale(pulse)
+                            .background(color.copy(alpha = 0.14f), CircleShape)
+                            .border(1.dp, color.copy(alpha = 0.25f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(icon, null, tint = color, modifier = Modifier.size(22.dp))
+                    }
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(displaySiteLabel(scan.url), color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("$statusLabel • ${scan.time}", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+                    }
+                }
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        color = color.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(100.dp),
+                        border = BorderStroke(1.dp, color.copy(alpha = 0.28f))
+                    ) {
+                        Text(statusLabel, color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                    }
+                    Text(scan.confidence, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }
 
 @Composable
 fun SettingsScreenObsidian(navController: NavController) {
-    Scaffold(topBar = { OKTopBar(navController) }, bottomBar = { OKBottomNav(navController) }, containerColor = ObsidianColors.Background) { innerPadding ->
-        Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(24.dp)) {
-            Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
-            Spacer(modifier = Modifier.height(32.dp))
-            SettingsItem("Dark Mode", true)
-            SettingsItem("Real-time Protection", true)
-            SettingsItem("Auto-update Database", false)
+    val context = LocalContext.current
+    val appVersion = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0"
+        }.getOrDefault("1.0")
+    }
+
+    var safeBrowsing by remember { mutableStateOf(true) }
+    var blockMaliciousSites by remember { mutableStateOf(true) }
+    var threatAlerts by remember { mutableStateOf(true) }
+    var incognitoMode by remember { mutableStateOf(false) }
+    var doNotTrack by remember { mutableStateOf(true) }
+    var darkMode by remember { mutableStateOf(true) }
+    var realTimeProtection by remember { mutableStateOf(true) }
+    var autoUpdateDatabase by remember { mutableStateOf(false) }
+    var notificationsEnabled by remember { mutableStateOf(true) }
+
+    var showClearDataDialog by remember { mutableStateOf(false) }
+    var showPrivacyPolicyDialog by remember { mutableStateOf(false) }
+    var showTermsDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+    var clearDataMessage by remember { mutableStateOf<String?>(null) }
+
+    if (showClearDataDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDataDialog = false },
+            containerColor = ObsidianColors.SurfaceContainer,
+            title = { Text("Clear browsing data?", color = Color.White) },
+            text = {
+                Text(
+                    "This will remove local browsing history, cached pages, and temporary web data stored in the app.",
+                    color = ObsidianColors.OnSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearDataDialog = false
+                        clearDataMessage = "Browsing data cleared"
+                    }
+                ) {
+                    Text("Clear", color = ObsidianColors.Error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDataDialog = false }) {
+                    Text("Cancel", color = ObsidianColors.OnSurfaceVariant)
+                }
+            }
+        )
+    }
+
+    if (showPrivacyPolicyDialog) {
+        SettingsInfoDialog(
+            title = "Privacy Policy",
+            message = "Eye ShielD processes on-device settings locally. URL analysis requests are sent only when you explicitly scan or browse through protected mode.",
+            onDismiss = { showPrivacyPolicyDialog = false }
+        )
+    }
+
+    if (showTermsDialog) {
+        SettingsInfoDialog(
+            title = "Terms & Conditions",
+            message = "Eye ShielD provides security insights to support safer browsing. It should be used as an aid, not as a sole source of trust decisions for sensitive transactions.",
+            onDismiss = { showTermsDialog = false }
+        )
+    }
+
+    if (showAboutDialog) {
+        SettingsInfoDialog(
+            title = "About Eye ShielD",
+            message = "Eye ShielD is a cybersecurity-focused browser companion built to help identify risky URLs, highlight reputation signals, and reduce exposure to malicious websites.",
+            onDismiss = { showAboutDialog = false }
+        )
+    }
+
+    Scaffold(
+        topBar = { OKTopBar(navController) },
+        bottomBar = { OKBottomNav(navController) },
+        containerColor = ObsidianColors.Background
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 24.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(
+                        "Manage protection, privacy, and app behavior with a streamlined security configuration.",
+                        color = ObsidianColors.OnSurfaceVariant,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+
+            item {
+                AnimatedVisibility(visible = clearDataMessage != null, enter = fadeIn(), exit = fadeOut()) {
+                    Surface(
+                        color = ObsidianColors.SurfaceContainerHigh,
+                        shape = RoundedCornerShape(18.dp),
+                        tonalElevation = 0.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .background(ObsidianColors.Safe.copy(alpha = 0.16f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Check, null, tint = ObsidianColors.Safe, modifier = Modifier.size(18.dp))
+                            }
+                            Text(clearDataMessage.orEmpty(), color = Color.White, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+
+            item {
+                SettingsSectionCard(title = "Security Settings", icon = Icons.Default.Security) {
+                    SettingsToggleRow(
+                        title = "Safe Browsing",
+                        description = "Warn before potentially dangerous pages load.",
+                        icon = Icons.Default.TravelExplore,
+                        checked = safeBrowsing,
+                        onCheckedChange = { safeBrowsing = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Block Malicious Sites",
+                        description = "Prevent access to flagged phishing and malware destinations.",
+                        icon = Icons.Default.Block,
+                        checked = blockMaliciousSites,
+                        onCheckedChange = { blockMaliciousSites = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Enable Threat Alerts",
+                        description = "Surface immediate alerts when suspicious activity is detected.",
+                        icon = Icons.Default.NotificationImportant,
+                        checked = threatAlerts,
+                        onCheckedChange = { threatAlerts = it }
+                    )
+                }
+            }
+
+            item {
+                SettingsSectionCard(title = "Privacy", icon = Icons.Default.PrivacyTip) {
+                    SettingsActionRow(
+                        title = "Clear Browsing Data",
+                        description = "Delete cached pages, session traces, and temporary site data.",
+                        icon = Icons.Default.DeleteSweep,
+                        accentColor = ObsidianColors.Error,
+                        onClick = {
+                            clearDataMessage = null
+                            showClearDataDialog = true
+                        }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Enable Incognito Mode",
+                        description = "Reduce local browsing traces for private sessions.",
+                        icon = Icons.Default.VisibilityOff,
+                        checked = incognitoMode,
+                        onCheckedChange = { incognitoMode = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Do Not Track",
+                        description = "Request that supported websites limit tracking behavior.",
+                        icon = Icons.Default.GppGood,
+                        checked = doNotTrack,
+                        onCheckedChange = { doNotTrack = it }
+                    )
+                }
+            }
+
+            item {
+                SettingsSectionCard(title = "App Settings", icon = Icons.Default.Tune) {
+                    SettingsToggleRow(
+                        title = "Dark Mode",
+                        description = "Keep the interface optimized for low-light use.",
+                        icon = Icons.Default.DarkMode,
+                        checked = darkMode,
+                        onCheckedChange = { darkMode = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Real-time Protection",
+                        description = "Continuously inspect active browsing sessions for risk.",
+                        icon = Icons.Default.GppMaybe,
+                        checked = realTimeProtection,
+                        onCheckedChange = { realTimeProtection = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Auto-update Database",
+                        description = "Refresh reputation intelligence and detection rules automatically.",
+                        icon = Icons.Default.SystemUpdateAlt,
+                        checked = autoUpdateDatabase,
+                        onCheckedChange = { autoUpdateDatabase = it }
+                    )
+                    SettingsDivider()
+                    SettingsToggleRow(
+                        title = "Notifications",
+                        description = "Receive app updates and security event notifications.",
+                        icon = Icons.Default.NotificationsActive,
+                        checked = notificationsEnabled,
+                        onCheckedChange = { notificationsEnabled = it }
+                    )
+                }
+            }
+
+            item {
+                SettingsSectionCard(title = "Info", icon = Icons.Default.Info) {
+                    SettingsInfoRow(
+                        title = "App Version",
+                        value = appVersion,
+                        icon = Icons.Default.Info,
+                        showChevron = false,
+                        onClick = {}
+                    )
+                    SettingsDivider()
+                    SettingsInfoRow(
+                        title = "Privacy Policy",
+                        value = "Review how data is handled",
+                        icon = Icons.Default.Policy,
+                        onClick = { showPrivacyPolicyDialog = true }
+                    )
+                    SettingsDivider()
+                    SettingsInfoRow(
+                        title = "Terms & Conditions",
+                        value = "Usage terms and responsibilities",
+                        icon = Icons.Default.Description,
+                        onClick = { showTermsDialog = true }
+                    )
+                    SettingsDivider()
+                    SettingsInfoRow(
+                        title = "About App",
+                        value = "Product overview and purpose",
+                        icon = Icons.Default.Info,
+                        onClick = { showAboutDialog = true }
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-fun SettingsItem(label: String, enabled: Boolean) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = ObsidianColors.OnSurfaceVariant, fontSize = 18.sp)
-        Switch(checked = enabled, onCheckedChange = {}, colors = SwitchDefaults.colors(checkedThumbColor = ObsidianColors.Primary, checkedTrackColor = ObsidianColors.Primary.copy(alpha = 0.5f)))
+fun SettingsSectionCard(title: String, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = ObsidianColors.SurfaceContainerLow,
+        shape = RoundedCornerShape(24.dp),
+        tonalElevation = 0.dp,
+        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.35f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            content = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(ObsidianColors.Primary.copy(alpha = 0.12f), RoundedCornerShape(12.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(18.dp))
+                    }
+                    Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                }
+                content()
+            }
+        )
     }
+}
+
+@Composable
+fun SettingsToggleRow(
+    title: String,
+    description: String,
+    icon: ImageVector,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val rowScale by animateFloatAsState(if (pressed) 0.99f else 1f, tween(140), label = "settings_toggle_row_scale")
+    val iconScale by animateFloatAsState(if (checked) 1f else 0.92f, tween(220), label = "settings_toggle_icon_scale")
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(rowScale)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(interactionSource = interactionSource, indication = null) { onCheckedChange(!checked) }
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .scale(iconScale)
+                .background(
+                    if (checked) ObsidianColors.Primary.copy(alpha = 0.14f) else ObsidianColors.SurfaceContainerHigh,
+                    RoundedCornerShape(14.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = if (checked) ObsidianColors.Primary else ObsidianColors.OnSurfaceVariant, modifier = Modifier.size(20.dp))
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
+            Text(description, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = ObsidianColors.Primary,
+                checkedTrackColor = ObsidianColors.Primary.copy(alpha = 0.38f),
+                uncheckedThumbColor = ObsidianColors.OnSurfaceVariant,
+                uncheckedTrackColor = ObsidianColors.SurfaceBright
+            )
+        )
+    }
+}
+
+@Composable
+fun SettingsActionRow(
+    title: String,
+    description: String,
+    icon: ImageVector,
+    accentColor: Color,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.985f else 1f, tween(120), label = "settings_action_scale")
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(scale)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .background(accentColor.copy(alpha = 0.12f), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = accentColor, modifier = Modifier.size(20.dp))
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
+            Text(description, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+        Icon(Icons.Default.ChevronRight, null, tint = ObsidianColors.OnSurfaceVariant)
+    }
+}
+
+@Composable
+fun SettingsInfoRow(
+    title: String,
+    value: String,
+    icon: ImageVector,
+    showChevron: Boolean = true,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.99f else 1f, tween(120), label = "settings_info_scale")
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(scale)
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .background(ObsidianColors.SurfaceContainerHigh, RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(20.dp))
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
+            Text(value, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+        if (showChevron) {
+            Icon(Icons.Default.ChevronRight, null, tint = ObsidianColors.OnSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+fun SettingsDivider() {
+    HorizontalDivider(color = ObsidianColors.OutlineVariant.copy(alpha = 0.45f), thickness = 1.dp)
+}
+
+@Composable
+fun SettingsInfoDialog(title: String, message: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ObsidianColors.SurfaceContainer,
+        title = { Text(title, color = Color.White) },
+        text = { Text(message, color = ObsidianColors.OnSurfaceVariant, lineHeight = 20.sp) },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = ObsidianColors.Primary)
+            }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OKTopBar(navController: NavController? = null) {
-    CenterAlignedTopAppBar(
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Shield, null, tint = ObsidianColors.Primary, modifier = Modifier.size(24.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("Eye ShielD", fontWeight = FontWeight.Bold, style = TextStyle(brush = ObsidianColors.KineticGradient), letterSpacing = (-0.5).sp, fontSize = 20.sp)
-            }
-        },
-        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = ObsidianColors.Background.copy(alpha = 0.6f)),
-        actions = { 
-            IconButton(onClick = { navController?.navigate("settings") }) {
-                Icon(Icons.Default.Security, null, tint = ObsidianColors.Primary)
+    var visible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        visible = true
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp)
+            .animateContentSize()
+    ) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(animationSpec = tween(320, easing = FastOutSlowInEasing)) +
+                slideInVertically(animationSpec = tween(320, easing = FastOutSlowInEasing), initialOffsetY = { -it / 3 })
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+                    .height(36.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.Shield,
+                    null,
+                    tint = ObsidianColors.Primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "EyeShield",
+                    color = ObsidianColors.OnBackground,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 17.sp,
+                    letterSpacing = (-0.2).sp,
+                    maxLines = 1
+                )
             }
         }
-    )
+    }
 }
 
 @Composable
@@ -1120,12 +2518,6 @@ fun OKBottomNav(navController: NavController) {
                 }
             },
             label = { Text("Scans", fontSize = 10.sp) }
-        )
-        NavigationBarItem(
-            selected = false,
-            onClick = { },
-            icon = { Icon(Icons.Default.VerifiedUser, null) },
-            label = { Text("Shield", fontSize = 10.sp) }
         )
         NavigationBarItem(
             selected = currentRoute == "settings",

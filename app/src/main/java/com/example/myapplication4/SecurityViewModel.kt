@@ -76,6 +76,10 @@ class SecurityViewModel(
         _scanState.value = ScanState.Idle
     }
 
+    fun removeRecentScan(url: String) {
+        _recentScans.value = _recentScans.value.orEmpty().filterNot { it.url == url }
+    }
+
     private fun addRecentScan(scan: ScanState.Success) {
         val timestamp = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
         val newItem = RecentScanInfo(

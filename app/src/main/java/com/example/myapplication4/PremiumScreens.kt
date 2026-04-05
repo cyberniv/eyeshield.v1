@@ -757,7 +757,6 @@ fun BottomNavigation(modifier: Modifier = Modifier) {
     ) {
         NavItem("HOME", Icons.Default.Home)
         NavItem("SCANS", Icons.Default.Radar, isActive = true)
-        NavItem("SHIELD", Icons.Default.VerifiedUser)
         NavItem("SETTINGS", Icons.Default.Settings)
     }
 }

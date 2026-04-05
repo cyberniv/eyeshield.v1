@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confidence Score UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="min-h-screen bg-slate-950 text-white antialiased">
+    <main class="flex min-h-screen items-center justify-center px-6 py-12">
+        <div class="confidence-widget flex flex-col items-center gap-5 sm:flex-row sm:items-center sm:gap-7" data-score="65" aria-label="Confidence score 65 percent">
+            <div class="ring-shell relative aspect-square w-40 shrink-0 sm:w-44">
+                <div class="pointer-events-none absolute inset-4 rounded-full bg-cyan-400/10 blur-2xl"></div>
+                <svg viewBox="0 0 160 160" class="relative h-full w-full overflow-visible drop-shadow-[0_0_25px_rgba(0,255,200,0.5)]" role="img" aria-hidden="true">
+                            <defs>
+                                <linearGradient id="confidenceArc" x1="20" y1="140" x2="140" y2="20" gradientUnits="userSpaceOnUse">
+                                    <stop offset="0%" stop-color="#22d3ee"></stop>
+                                    <stop offset="55%" stop-color="#38bdf8"></stop>
+                                    <stop offset="100%" stop-color="#7dd3fc"></stop>
+                                </linearGradient>
+                                <filter id="confidenceGlow" x="-50%" y="-50%" width="200%" height="200%">
+                                    <feGaussianBlur stdDeviation="4.5" result="blur"></feGaussianBlur>
+                                    <feMerge>
+                                        <feMergeNode in="blur"></feMergeNode>
+                                        <feMergeNode in="SourceGraphic"></feMergeNode>
+                                    </feMerge>
+                                </filter>
+                            </defs>
+
+                            <circle
+                                cx="80"
+                                cy="80"
+                                r="54"
+                                pathLength="100"
+                                stroke-linecap="round"
+                                stroke-width="8"
+                                class="confidence-track"
+                            ></circle>
+                            <circle
+                                cx="80"
+                                cy="80"
+                                r="54"
+                                pathLength="100"
+                                stroke-linecap="round"
+                                stroke-width="8"
+                                class="confidence-progress"
+                                filter="url(#confidenceGlow)"
+                            ></circle>
+                </svg>
+
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <div class="ring-core flex h-20 w-20 items-center justify-center rounded-full border border-cyan-300/20 bg-slate-950/90 shadow-[inset_0_0_24px_rgba(34,211,238,0.12)]">
+                        <div class="flex h-11 w-11 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-400/10 text-cyan-200 shadow-[0_0_18px_rgba(0,255,200,0.18)]">
+                            <svg viewBox="0 0 24 24" class="h-5 w-5 fill-none stroke-current" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 3l6 2.5v5.6c0 4.2-2.6 7.9-6 9.9-3.4-2-6-5.7-6-9.9V5.5L12 3z"></path>
+                                <path d="M9.4 12.2l1.8 1.8 3.6-4"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="score-copy flex min-w-[9rem] flex-col items-center text-center sm:items-start sm:text-left">
+                <p class="text-[0.7rem] font-semibold uppercase tracking-[0.32em] text-slate-400">Confidence Score</p>
+                <div class="mt-2 flex items-start gap-1">
+                    <span class="confidence-value bg-gradient-to-b from-white via-cyan-100 to-cyan-400 bg-clip-text text-6xl font-black leading-none tracking-tight text-transparent sm:text-7xl">0</span>
+                    <span class="pt-2 text-xl font-semibold text-cyan-300/85">%</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>

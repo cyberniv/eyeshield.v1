@@ -27,6 +27,9 @@ class SecurityViewModel(
     private val _scanState = MutableLiveData<ScanState>(ScanState.Idle)
     val scanState: LiveData<ScanState> = _scanState
 
+    private val _lastRequestedUrl = MutableLiveData<String?>(null)
+    val lastRequestedUrl: LiveData<String?> = _lastRequestedUrl
+
     private val _recentScans = MutableLiveData<List<RecentScanInfo>>(emptyList())
     val recentScans: LiveData<List<RecentScanInfo>> = _recentScans
 
@@ -36,6 +39,8 @@ class SecurityViewModel(
             _scanState.value = ScanState.Error("Enter a URL to scan")
             return
         }
+
+        _lastRequestedUrl.value = normalizedUrl
 
         viewModelScope.launch {
             _scanState.value = ScanState.Loading
@@ -74,6 +79,13 @@ class SecurityViewModel(
 
     fun reset() {
         _scanState.value = ScanState.Idle
+    }
+
+    fun retryLastScan() {
+        val lastUrl = _lastRequestedUrl.value?.trim().orEmpty()
+        if (lastUrl.isNotBlank()) {
+            scanUrl(lastUrl)
+        }
     }
 
     fun removeRecentScan(url: String) {

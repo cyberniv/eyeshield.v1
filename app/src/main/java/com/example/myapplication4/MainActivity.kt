@@ -1,6 +1,7 @@
 package com.example.myapplication4
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
@@ -12,14 +13,18 @@ import android.webkit.WebView
 import android.webkit.WebChromeClient
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -40,6 +45,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.*
@@ -64,6 +70,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -178,14 +185,18 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainApp(externalUrl: String? = null, onExternalUrlConsumed: () -> Unit = {}) {
+    val context = LocalContext.current
     val navController = rememberNavController()
     val viewModel: SecurityViewModel = viewModel()
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+    var showExitDialog by remember { mutableStateOf(false) }
     val startSecureScan: (String) -> Unit = remember(navController, viewModel) {
         { rawUrl ->
             val normalizedUrl = rawUrl.trim()
             if (normalizedUrl.isNotBlank()) {
                 viewModel.scanUrl(normalizedUrl)
-                navController.navigate("analysis") {
+                navController.navigate("scan-progress") {
                     launchSingleTop = true
                 }
             }
@@ -197,15 +208,73 @@ fun MainApp(externalUrl: String? = null, onExternalUrlConsumed: () -> Unit = {})
         startSecureScan(url)
         onExternalUrlConsumed()
     }
+
+    BackHandler(enabled = currentRoute == "home" || currentRoute == null) {
+        showExitDialog = true
+    }
+
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            containerColor = ObsidianColors.SurfaceContainer,
+            title = { Text("Exit EyeShield?", color = Color.White) },
+            text = { Text("You will close the secure session.", color = ObsidianColors.OnSurfaceVariant) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showExitDialog = false
+                        (context as? Activity)?.finish()
+                    }
+                ) {
+                    Text("Exit", color = ObsidianColors.Error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitDialog = false }) {
+                    Text("Cancel", color = ObsidianColors.OnSurfaceVariant)
+                }
+            }
+        )
+    }
     
     Box(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
-        NavHost(navController = navController, startDestination = "home") {
+        NavHost(
+            navController = navController,
+            startDestination = "home",
+            enterTransition = {
+                fadeIn(animationSpec = tween(240)) + slideInHorizontally(
+                    initialOffsetX = { it / 12 },
+                    animationSpec = tween(240, easing = FastOutSlowInEasing)
+                )
+            },
+            exitTransition = {
+                fadeOut(animationSpec = tween(180)) + slideOutHorizontally(
+                    targetOffsetX = { -it / 18 },
+                    animationSpec = tween(180, easing = FastOutSlowInEasing)
+                )
+            },
+            popEnterTransition = {
+                fadeIn(animationSpec = tween(220)) + slideInHorizontally(
+                    initialOffsetX = { -it / 12 },
+                    animationSpec = tween(220, easing = FastOutSlowInEasing)
+                )
+            },
+            popExitTransition = {
+                fadeOut(animationSpec = tween(180)) + slideOutHorizontally(
+                    targetOffsetX = { it / 18 },
+                    animationSpec = tween(180, easing = FastOutSlowInEasing)
+                )
+            }
+        ) {
             composable("home") {
                 HomeScreenObsidian(
                     navController = navController,
                     viewModel = viewModel,
                     onScanRequested = startSecureScan
                 )
+            }
+            composable("scan-progress") {
+                ScanProgressScreenObsidian(navController = navController, viewModel = viewModel)
             }
             composable("analysis") {
                 AnalysisScreenObsidian(navController = navController, viewModel = viewModel)
@@ -215,6 +284,9 @@ fun MainApp(externalUrl: String? = null, onExternalUrlConsumed: () -> Unit = {})
             }
             composable("settings") {
                 SettingsScreenObsidian(navController = navController)
+            }
+            composable("share") {
+                ShareScreenObsidian(navController = navController, viewModel = viewModel)
             }
             composable(
                 "webview/{url}",
@@ -237,11 +309,13 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
     var urlInput by remember { mutableStateOf("") }
     var homeMessage by remember { mutableStateOf<String?>(null) }
     var showTipCard by remember { mutableStateOf(true) }
+    val scanButtonInteraction = remember { MutableInteractionSource() }
+    val scanButtonPressed by scanButtonInteraction.collectIsPressedAsState()
+    val scanButtonScale by animateFloatAsState(if (scanButtonPressed) 0.97f else 1f, tween(120), label = "home_scan_button_scale")
     val context = LocalContext.current
     val clipboardManager = remember(context) { context.getSystemService(ClipboardManager::class.java) }
     val recentScans by viewModel.recentScans.observeAsState(emptyList())
     val recentItems = remember(recentScans) { recentScans.take(3) }
-    val lastVisitedSite = recentItems.firstOrNull()?.url
 
     LaunchedEffect(recentItems.isNotEmpty()) {
         if (recentItems.isNotEmpty()) {
@@ -250,29 +324,39 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
     }
 
     Scaffold(
-        topBar = { OKTopBar(navController) },
+        topBar = { OKTopBar(title = "Home") },
         bottomBar = { OKBottomNav(navController) },
         containerColor = ObsidianColors.Background
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF08111D),
+                            ObsidianColors.Background,
+                            Color(0xFF05080F)
+                        )
+                    )
+                )
                 .padding(innerPadding)
-                .padding(horizontal = 24.dp),
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(bottom = 44.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             item {
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(14.dp))
                 AnimatedShieldHero()
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.6f)).border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.2f), RoundedCornerShape(16.dp)).padding(8.dp)) {
+                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.58f)).border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.18f), RoundedCornerShape(18.dp)).padding(horizontal = 8.dp, vertical = 7.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Language, null, tint = ObsidianColors.Primary, modifier = Modifier.padding(start = 12.dp))
                         BasicTextField(
                             value = urlInput,
                             onValueChange = { urlInput = it },
-                            modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                            modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
                             textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
                             decorationBox = { innerTextField ->
                                 if (urlInput.isEmpty()) Text("Enter or paste URL", color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.5f))
@@ -286,54 +370,36 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
                                     onScanRequested(enteredUrl)
                                 }
                             },
+                            interactionSource = scanButtonInteraction,
                             shape = RoundedCornerShape(100.dp),
-                            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 14.dp),
-                            modifier = Modifier.background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp)),
+                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp),
+                            modifier = Modifier.scale(scanButtonScale).background(ObsidianColors.KineticGradient, RoundedCornerShape(100.dp)),
                             colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent)
                         ) {
-                            Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Analyze URL", color = Color.Black, fontWeight = FontWeight.Bold)
+                            Icon(Icons.Default.Radar, null, tint = Color.Black, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Analyze", color = Color.Black, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                Row(
+                QuickActionButton(
+                    title = "Scan Clipboard",
+                    subtitle = "Instantly check copied URLs",
+                    icon = Icons.Default.ContentPasteSearch,
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    QuickActionButton(
-                        title = "Scan Copied Link",
-                        subtitle = "Instantly check copied URLs",
-                        icon = Icons.Default.ContentPasteSearch,
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            val clipboardText = clipboardManager?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
-                            if (clipboardText.isNotBlank()) {
-                                homeMessage = null
-                                onScanRequested(clipboardText)
-                            } else {
-                                homeMessage = "Clipboard does not contain a URL"
-                            }
+                    onClick = {
+                        val clipboardText = clipboardManager?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
+                        if (clipboardText.isNotBlank()) {
+                            homeMessage = null
+                            onScanRequested(clipboardText)
+                        } else {
+                            homeMessage = "Clipboard does not contain a URL"
                         }
-                    )
-                    QuickActionButton(
-                        title = "Scan Recent Site",
-                        subtitle = "Analyze your last visited website",
-                        icon = Icons.Default.History,
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            if (!lastVisitedSite.isNullOrBlank()) {
-                                homeMessage = null
-                                onScanRequested(lastVisitedSite)
-                            } else {
-                                homeMessage = "No recent site available yet"
-                            }
-                        }
-                    )
-                }
+                    }
+                )
 
                 AnimatedVisibility(visible = homeMessage != null, enter = fadeIn(), exit = fadeOut()) {
                     Surface(
@@ -355,7 +421,7 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
 
                 AnimatedVisibility(visible = showTipCard, enter = fadeIn(), exit = fadeOut()) {
                     Column {
-                        Spacer(modifier = Modifier.height(18.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
                         TipCard(
                             title = "Security Tip",
                             message = "Avoid unknown links. Always verify the source before opening.",
@@ -364,78 +430,25 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
-                RecentIntelligenceHeader(onViewLedger = { navController.navigate("scans") })
                 Spacer(modifier = Modifier.height(18.dp))
-            }
-
-            if (recentItems.isEmpty()) {
-                item {
-                    EmptyScansState(
-                        onCardClick = { navController.navigate("scans") },
-                        onScanNow = {
-                            homeMessage = "Enter or paste a URL above to start scanning"
-                        }
-                    )
-                }
-            } else {
-                items(recentItems) { scan ->
-                    RecentIntelligenceItem(scan = scan, onClick = { navController.navigate("scans") })
-                    Spacer(modifier = Modifier.height(12.dp))
-                }
+                RecentScansExpandableCard(
+                    recentItems = recentItems,
+                    onScanSelected = { onScanRequested(it.url) },
+                    onEmptyAction = {
+                        homeMessage = "Enter or paste a URL above to start scanning"
+                    }
+                )
             }
 
             item {
-                Spacer(modifier = Modifier.height(84.dp))
+                Spacer(modifier = Modifier.height(32.dp))
             }
         }
     }
 }
 
 @Composable
-fun RecentIntelligenceHeader(onViewLedger: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                "Recent Scans",
-                fontSize = 26.sp,
-                fontWeight = FontWeight.SemiBold,
-                style = TextStyle(
-                    brush = Brush.horizontalGradient(
-                        listOf(
-                            Color.White,
-                            ObsidianColors.Primary.copy(alpha = 0.92f)
-                        )
-                    )
-                )
-            )
-            Text("Your latest scan results and insights", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
-        }
-        Surface(
-            shape = RoundedCornerShape(100.dp),
-            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f),
-            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.16f)),
-            shadowElevation = 6.dp,
-            modifier = Modifier.clickable(onClick = onViewLedger)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(Icons.Default.Timeline, null, tint = ObsidianColors.Primary, modifier = Modifier.size(14.dp))
-                Text("View Ledger", color = ObsidianColors.Primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            }
-        }
-    }
-}
-
-@Composable
-fun RecentIntelligenceItem(scan: RecentScanInfo, onClick: () -> Unit) {
+fun RecentIntelligenceItem(scan: RecentScanInfo, isLatest: Boolean = false, onClick: () -> Unit) {
     val color = when (scan.verdict) {
         "SAFE" -> ObsidianColors.Safe
         "WARNING" -> ObsidianColors.Warning
@@ -492,6 +505,9 @@ fun RecentIntelligenceItem(scan: RecentScanInfo, onClick: () -> Unit) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Box(modifier = Modifier.size(8.dp).background(color, CircleShape))
                             Text(scan.verdict.lowercase().replaceFirstChar { it.uppercase() }, color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            if (isLatest) {
+                                Icon(Icons.Default.History, null, tint = ObsidianColors.Primary.copy(alpha = 0.88f), modifier = Modifier.size(12.dp))
+                            }
                             Text(scan.time, color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
                         }
                     }
@@ -518,16 +534,284 @@ fun RecentIntelligenceItem(scan: RecentScanInfo, onClick: () -> Unit) {
 }
 
 @Composable
+fun RecentScansExpandableCard(
+    recentItems: List<RecentScanInfo>,
+    onScanSelected: (RecentScanInfo) -> Unit,
+    onEmptyAction: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val cardScale by animateFloatAsState(
+        targetValue = when {
+            pressed -> 0.985f
+            expanded -> 1f
+            else -> 0.992f
+        },
+        animationSpec = tween(durationMillis = 300),
+        label = "recent_scans_expandable_scale"
+    )
+    val borderAlpha by animateFloatAsState(
+        targetValue = if (expanded) 0.34f else 0.2f,
+        animationSpec = tween(durationMillis = 300),
+        label = "recent_scans_expandable_border"
+    )
+    val glowAlpha by animateFloatAsState(
+        targetValue = if (expanded) 0.18f else 0.1f,
+        animationSpec = tween(durationMillis = 300),
+        label = "recent_scans_expandable_glow"
+    )
+    val latestScan = recentItems.firstOrNull()
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .scale(cardScale)
+            .animateContentSize(animationSpec = tween(durationMillis = 300)),
+        shape = RoundedCornerShape(24.dp),
+        color = Color.Transparent,
+        shadowElevation = if (expanded) 18.dp else 12.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .background(
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.78f),
+                            ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .border(
+                    width = 1.dp,
+                    color = ObsidianColors.Primary.copy(alpha = borderAlpha),
+                    shape = RoundedCornerShape(24.dp)
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(1.dp)
+                    .background(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                ObsidianColors.Primary.copy(alpha = glowAlpha),
+                                Color.Transparent
+                            )
+                        ),
+                        shape = RoundedCornerShape(24.dp)
+                    )
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(interactionSource = interactionSource, indication = null) { expanded = !expanded }
+                    .padding(horizontal = 16.dp, vertical = 15.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            text = "Recent Scans",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (expanded) "Tap to collapse history" else "Tap to view history",
+                            color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.8f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(100.dp),
+                        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f),
+                        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.18f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = if (recentItems.isEmpty()) "Empty" else "${recentItems.size}",
+                                color = ObsidianColors.Primary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Icon(
+                                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = null,
+                                tint = ObsidianColors.Primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (!expanded && latestScan == null) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                        color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f),
+                        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.22f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.9f), RoundedCornerShape(12.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.HistoryToggleOff, null, tint = ObsidianColors.OnSurfaceVariant, modifier = Modifier.size(18.dp))
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text("No scans yet", color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                Text("Tap to start scanning", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                } else if (!expanded && latestScan != null) {
+                    RecentIntelligenceItem(
+                        scan = latestScan,
+                        isLatest = true,
+                        onClick = { onScanSelected(latestScan) }
+                    )
+                }
+
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = fadeIn(animationSpec = tween(durationMillis = 300)) + expandVertically(animationSpec = tween(durationMillis = 300)),
+                    exit = fadeOut(animationSpec = tween(durationMillis = 220)) + shrinkVertically(animationSpec = tween(durationMillis = 220))
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (recentItems.isEmpty()) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(18.dp),
+                                color = ObsidianColors.SurfaceContainer.copy(alpha = 0.62f),
+                                border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.18f))
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text("No scan history available", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                    Text("Run your first scan from the URL field or clipboard action above.", color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+                                }
+                            }
+                        } else {
+                            recentItems.forEachIndexed { index, scan ->
+                                RecentIntelligenceItem(
+                                    scan = scan,
+                                    isLatest = index == 0,
+                                    onClick = { onScanSelected(scan) }
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { expanded = false },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.24f))
+                            ) {
+                                Icon(Icons.Default.UnfoldLess, null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Collapse")
+                            }
+                            Button(
+                                onClick = {
+                                    if (recentItems.isEmpty()) {
+                                        onEmptyAction()
+                                    } else {
+                                        onScanSelected(recentItems.first())
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ObsidianColors.Primary.copy(alpha = 0.16f),
+                                    contentColor = ObsidianColors.Primary
+                                ),
+                                border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.22f))
+                            ) {
+                                Icon(
+                                    imageVector = if (recentItems.isEmpty()) Icons.Default.Radar else Icons.Default.History,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(if (recentItems.isEmpty()) "Start Scan" else "Scan Latest")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ScanProgressScreenObsidian(navController: NavController, viewModel: SecurityViewModel) {
+    val scanState by viewModel.scanState.observeAsState(ScanState.Idle)
+
+    LaunchedEffect(scanState) {
+        if (scanState is ScanState.Success || scanState is ScanState.Error) {
+            navController.navigate("analysis") {
+                popUpTo("scan-progress") { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    Scaffold(
+        containerColor = ObsidianColors.Background,
+        topBar = { OKTopBar(title = "Scanning") },
+        bottomBar = { OKBottomNav(navController) }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentAlignment = Alignment.Center
+        ) {
+            LoadingScreenObsidian()
+        }
+    }
+}
+
+@Composable
 fun QuickActionButton(title: String, subtitle: String, icon: ImageVector, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(140), label = "quick_action_scale")
+    val borderAlpha by animateFloatAsState(if (pressed) 0.24f else 0.12f, tween(140), label = "quick_action_border_alpha")
 
     Surface(
         modifier = modifier.scale(scale),
         shape = RoundedCornerShape(18.dp),
         color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.55f),
-        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.12f)),
+        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = borderAlpha)),
         shadowElevation = 8.dp
     ) {
         Box(
@@ -543,20 +827,20 @@ fun QuickActionButton(title: String, subtitle: String, icon: ImageVector, modifi
                     )
                 )
                 .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-                .padding(horizontal = 14.dp, vertical = 14.dp)
+                .padding(horizontal = 15.dp, vertical = 15.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(38.dp)
                         .background(ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.78f), RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(18.dp))
+                    Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(20.dp))
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    Text(subtitle, color = ObsidianColors.OnSurfaceVariant, fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2)
+                    Text(subtitle, color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.78f), fontSize = 11.sp, fontWeight = FontWeight.Normal, lineHeight = 15.sp, maxLines = 2)
                 }
             }
         }
@@ -661,14 +945,14 @@ fun EmptyScansState(onCardClick: () -> Unit, onScanNow: () -> Unit) {
                             )
                         )
                     )
-                    .padding(horizontal = 22.dp, vertical = 24.dp)
+                    .padding(horizontal = 22.dp, vertical = 22.dp)
             ) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Box(modifier = Modifier.size(96.dp), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier.size(104.dp), contentAlignment = Alignment.Center) {
                         Canvas(modifier = Modifier.fillMaxSize().rotate(ringRotation)) {
                             drawArc(
                                 brush = Brush.sweepGradient(
@@ -698,7 +982,7 @@ fun EmptyScansState(onCardClick: () -> Unit, onScanNow: () -> Unit) {
                     }
                     Text("No scans yet", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
                     Text(
-                        "Scan a website to view protection insights and history",
+                        "Scan a website to see security insights",
                         color = ObsidianColors.OnSurfaceVariant,
                         fontSize = 13.sp,
                         lineHeight = 18.sp,
@@ -731,137 +1015,209 @@ fun displaySiteLabel(url: String): String {
     }.getOrDefault(url)
 }
 
+enum class HeroSecurityStatus {
+    Safe,
+    Warning,
+    Danger
+}
+
 @Composable
-fun AnimatedShieldHero() {
+fun AnimatedShieldHero(status: HeroSecurityStatus = HeroSecurityStatus.Safe) {
     val infiniteTransition = rememberInfiniteTransition(label = "hero_shield")
     val coreScale by infiniteTransition.animateFloat(
-        initialValue = 0.98f,
-        targetValue = 1.04f,
+        initialValue = 0.99f,
+        targetValue = 1.03f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = EaseInOutSine),
+            animation = tween(2400, easing = EaseInOutSine),
             repeatMode = RepeatMode.Reverse
         ),
         label = "hero_core_scale"
     )
-    val outerPulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.78f,
-        targetValue = 1.24f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "hero_outer_pulse_scale"
-    )
-    val outerPulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2600, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "hero_outer_pulse_alpha"
-    )
-    val innerPulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.72f,
+    val glowPulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.88f,
         targetValue = 1.1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2600, delayMillis = 450, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
+            animation = tween(2600, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
         ),
-        label = "hero_inner_pulse_scale"
+        label = "hero_glow_pulse_scale"
     )
-    val innerPulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.28f,
-        targetValue = 0f,
+    val glowPulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.14f,
+        targetValue = 0.26f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2600, delayMillis = 450, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
+            animation = tween(2600, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
         ),
-        label = "hero_inner_pulse_alpha"
+        label = "hero_glow_pulse_alpha"
     )
-    val scanRotation by infiniteTransition.animateFloat(
+    val ringRotation by infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
+            animation = tween(18000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
-        label = "hero_scan_rotation"
+        label = "hero_ring_rotation"
+    )
+    val innerRingRotation by infiniteTransition.animateFloat(
+        initialValue = 360f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(24000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "hero_inner_ring_rotation"
+    )
+    val reflectionShift by infiniteTransition.animateFloat(
+        initialValue = -100f,
+        targetValue = 140f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(3200, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "hero_reflection_shift"
+    )
+    val statusDotScale by infiniteTransition.animateFloat(
+        initialValue = 0.82f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "hero_status_dot_scale"
+    )
+    val statusDotGlowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.12f,
+        targetValue = 0.32f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "hero_status_dot_glow_alpha"
+    )
+    val pillBorderAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.16f,
+        targetValue = 0.24f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2400, easing = EaseInOutSine),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "hero_status_border_alpha"
     )
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    val statusColor = when (status) {
+        HeroSecurityStatus.Safe -> Color(0xFF39FF88)
+        HeroSecurityStatus.Warning -> Color(0xFFFFC857)
+        HeroSecurityStatus.Danger -> Color(0xFFFF6B6B)
+    }
+    val statusText = when (status) {
+        HeroSecurityStatus.Safe -> "EyeShield Active"
+        HeroSecurityStatus.Warning -> "Risk Detected"
+        HeroSecurityStatus.Danger -> "Threat Detected"
+    }
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Box(
             modifier = Modifier
-                .size(228.dp),
+                .fillMaxWidth()
+                .height(248.dp),
             contentAlignment = Alignment.Center
         ) {
             Box(
                 modifier = Modifier
-                    .size(212.dp)
+                    .size(236.dp)
+                    .scale(glowPulseScale)
                     .background(
                         Brush.radialGradient(
                             colors = listOf(
-                                ObsidianColors.Primary.copy(alpha = 0.2f),
-                                ObsidianColors.Secondary.copy(alpha = 0.08f),
+                                ObsidianColors.Primary.copy(alpha = glowPulseAlpha),
+                                ObsidianColors.Secondary.copy(alpha = glowPulseAlpha * 0.55f),
                                 Color.Transparent
                             )
                         ),
                         CircleShape
                     )
-                    .blur(26.dp)
+                    .blur(30.dp)
             )
 
             Box(
                 modifier = Modifier
-                    .size(188.dp)
-                    .scale(outerPulseScale)
-                    .border(
-                        width = 1.5.dp,
-                        color = ObsidianColors.Primary.copy(alpha = outerPulseAlpha),
-                        shape = CircleShape
+                    .align(Alignment.BottomCenter)
+                    .offset(y = 26.dp)
+                    .size(width = 148.dp, height = 22.dp)
+                    .background(
+                        Brush.radialGradient(
+                            listOf(
+                                Color.Black.copy(alpha = 0.34f),
+                                Color.Transparent
+                            )
+                        ),
+                        CircleShape
                     )
-            )
-
-            Box(
-                modifier = Modifier
-                    .size(160.dp)
-                    .scale(innerPulseScale)
-                    .border(
-                        width = 1.dp,
-                        color = ObsidianColors.Secondary.copy(alpha = innerPulseAlpha),
-                        shape = CircleShape
-                    )
+                    .blur(12.dp)
             )
 
             Canvas(
                 modifier = Modifier
-                    .size(186.dp)
-                    .rotate(scanRotation)
+                    .size(210.dp)
+                    .rotate(ringRotation)
             ) {
+                drawCircle(
+                    color = ObsidianColors.Primary.copy(alpha = 0.1f),
+                    radius = size.minDimension / 2,
+                    style = Stroke(width = 1.dp.toPx())
+                )
                 drawArc(
                     brush = Brush.sweepGradient(
                         listOf(
                             Color.Transparent,
                             ObsidianColors.Primary.copy(alpha = 0.95f),
-                            ObsidianColors.Secondary.copy(alpha = 0.4f),
+                            ObsidianColors.Secondary.copy(alpha = 0.5f),
                             Color.Transparent
                         )
                     ),
-                    startAngle = 16f,
-                    sweepAngle = 92f,
+                    startAngle = 8f,
+                    sweepAngle = 102f,
                     useCenter = false,
-                    style = Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round)
+                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+                )
+            }
+
+            Canvas(
+                modifier = Modifier
+                    .size(176.dp)
+                    .rotate(innerRingRotation)
+            ) {
+                drawCircle(
+                    color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.12f),
+                    radius = size.minDimension / 2,
+                    style = Stroke(width = 0.8.dp.toPx())
+                )
+                drawArc(
+                    brush = Brush.sweepGradient(
+                        listOf(
+                            Color.Transparent,
+                            ObsidianColors.Primary.copy(alpha = 0.7f),
+                            ObsidianColors.Secondary.copy(alpha = 0.28f),
+                            Color.Transparent
+                        )
+                    ),
+                    startAngle = 52f,
+                    sweepAngle = 74f,
+                    useCenter = false,
+                    style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
                 )
             }
 
             Surface(
                 modifier = Modifier
-                    .size(148.dp)
+                    .size(162.dp)
                     .scale(coreScale),
                 shape = CircleShape,
-                color = ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.78f),
-                border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.24f)),
-                shadowElevation = 18.dp
+                color = ObsidianColors.SurfaceContainerHighest.copy(alpha = 0.8f),
+                border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.22f)),
+                shadowElevation = 22.dp
             ) {
                 Box(
                     modifier = Modifier
@@ -879,18 +1235,33 @@ fun AnimatedShieldHero() {
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(102.dp)
+                            .size(114.dp)
                             .clip(CircleShape)
                             .background(ObsidianColors.SurfaceContainerLow.copy(alpha = 0.92f))
                             .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.15f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .background(
+                                    Brush.linearGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.14f),
+                                            Color.Transparent,
+                                            Color.White.copy(alpha = 0.02f)
+                                        ),
+                                        start = androidx.compose.ui.geometry.Offset(reflectionShift, 0f),
+                                        end = androidx.compose.ui.geometry.Offset(reflectionShift + 120f, 180f)
+                                    )
+                                )
+                        )
                         Icon(
                             Icons.Default.Security,
                             null,
-                            tint = Color.White,
+                            tint = Color.White.copy(alpha = 0.96f),
                             modifier = Modifier
-                                .size(54.dp)
+                                .size(58.dp)
                                 .graphicsLayer(alpha = 0.99f)
                                 .drawWithCache {
                                     onDrawWithContent {
@@ -904,30 +1275,53 @@ fun AnimatedShieldHero() {
             }
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
-
         Surface(
-            color = ObsidianColors.SurfaceContainer.copy(alpha = 0.72f),
+            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.42f),
             shape = RoundedCornerShape(100.dp),
-            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.18f))
+            border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = pillBorderAlpha)),
+            shadowElevation = 8.dp,
+            modifier = Modifier.blur(0.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Box(
+                modifier = Modifier
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.04f),
+                                ObsidianColors.Primary.copy(alpha = 0.08f),
+                                Color.Transparent
+                            )
+                        ),
+                        RoundedCornerShape(100.dp)
+                    )
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .background(ObsidianColors.Primary, CircleShape)
-                )
-                Text(
-                    text = "All Systems Secure",
-                    color = ObsidianColors.OnBackground,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 0.6.sp
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(modifier = Modifier.size(10.dp), contentAlignment = Alignment.Center) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .scale(statusDotScale)
+                                .background(statusColor.copy(alpha = statusDotGlowAlpha), CircleShape)
+                                .blur(4.dp)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(statusColor, CircleShape)
+                        )
+                    }
+                    Text(
+                        text = statusText,
+                        color = Color(0xFFF3F7FF).copy(alpha = 0.95f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.55.sp
+                    )
+                }
             }
         }
     }
@@ -1014,36 +1408,17 @@ fun StageCard(title: String, desc: String, status: String, icon: ImageVector, is
 @Composable
 fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityViewModel) {
     val scanState by viewModel.scanState.observeAsState(ScanState.Idle)
+    val lastRequestedUrl by viewModel.lastRequestedUrl.observeAsState(null)
+    val refreshScan: () -> Unit = remember(viewModel) { { viewModel.retryLastScan() } }
     
     when (scanState) {
         ScanState.Loading -> {
-            Scaffold(
-                containerColor = ObsidianColors.Background,
-                topBar = { OKTopBar(navController) },
-                bottomBar = {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 24.dp, vertical = 24.dp)
-                    ) {
-                        PressableOutlinedActionButton(
-                            text = "Cancel",
-                            icon = Icons.Default.Close,
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                viewModel.reset()
-                                navController.navigate("home") {
-                                    popUpTo("home") { inclusive = true }
-                                }
-                            }
-                        )
-                    }
-                }
-            ) { innerPadding ->
-                Box(modifier = Modifier.padding(innerPadding)) {
-                    LoadingScreenObsidian()
+            LaunchedEffect(Unit) {
+                navController.navigate("scan-progress") {
+                    launchSingleTop = true
                 }
             }
+            Box(modifier = Modifier.fillMaxSize())
         }
         is ScanState.Success -> {
             val success = scanState as ScanState.Success
@@ -1062,19 +1437,16 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
 
             Scaffold(
                 containerColor = ObsidianColors.Background,
-                topBar = { OKTopBar(navController) },
-                bottomBar = {
-                    Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp), contentAlignment = Alignment.BottomCenter) {
-                        Surface(modifier = Modifier.fillMaxWidth().height(80.dp), shape = CircleShape, color = ObsidianColors.SurfaceContainer.copy(alpha = 0.7f), tonalElevation = 8.dp) {
-                            Row(modifier = Modifier.fillMaxSize(), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = ObsidianColors.Primary) }
-                                IconButton(onClick = { }) { Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = ObsidianColors.Primary.copy(alpha = 0.4f)) }
-                                FloatingActionButton(onClick = { viewModel.scanUrl(success.url) }, containerColor = Color.Transparent, elevation = FloatingActionButtonDefaults.elevation(0.dp), modifier = Modifier.size(56.dp).clip(CircleShape).background(ObsidianColors.KineticGradient)) { Icon(Icons.Default.Refresh, null, tint = Color.Black) }
-                                IconButton(onClick = { }) { Icon(Icons.Default.Share, null, tint = ObsidianColors.Primary) }
-                            }
-                        }
-                    }
-                }
+                topBar = {
+                    OKTopBar(
+                        title = "Status",
+                        showBack = true,
+                        onBack = { navigateBackOrHome(navController) },
+                        showRefresh = !lastRequestedUrl.isNullOrBlank(),
+                        onRefresh = refreshScan
+                    )
+                },
+                bottomBar = { OKBottomNav(navController) }
             ) { innerPadding ->
                 Box(
                     modifier = Modifier
@@ -1199,14 +1571,25 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
                             }
                         }
                         item {
-                            Row(modifier = Modifier.fillMaxWidth().padding(bottom = 120.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 120.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
                                 PressableOutlinedActionButton(
-                                    text = "Go Back",
-                                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                                    text = "Scan Another",
+                                    icon = Icons.Default.Radar,
                                     modifier = Modifier.weight(1f),
                                     onClick = {
                                         viewModel.reset()
-                                        navController.popBackStack()
+                                        navController.navigate("home") {
+                                            popUpTo(navController.graph.findStartDestination().id) {
+                                                saveState = true
+                                            }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
                                     }
                                 )
                                 PressableGradientActionButton(
@@ -1230,26 +1613,16 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
 
             Scaffold(
                 containerColor = ObsidianColors.Background,
-                topBar = { OKTopBar(navController) },
-                bottomBar = {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 24.dp, vertical = 24.dp)
-                    ) {
-                        PressableOutlinedActionButton(
-                            text = "Back Home",
-                            icon = Icons.AutoMirrored.Filled.ArrowBack,
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                viewModel.reset()
-                                navController.navigate("home") {
-                                    popUpTo("home") { inclusive = true }
-                                }
-                            }
-                        )
-                    }
-                }
+                topBar = {
+                    OKTopBar(
+                        title = "Status",
+                        showBack = true,
+                        onBack = { navigateBackOrHome(navController) },
+                        showRefresh = !lastRequestedUrl.isNullOrBlank(),
+                        onRefresh = refreshScan
+                    )
+                },
+                bottomBar = { OKBottomNav(navController) }
             ) { innerPadding ->
                 Box(
                     modifier = Modifier
@@ -1292,12 +1665,226 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
             }
         }
         else -> {
-            LaunchedEffect(Unit) {
-                navController.navigate("home") {
-                    popUpTo("home") { inclusive = true }
+            Scaffold(
+                containerColor = ObsidianColors.Background,
+                topBar = {
+                    OKTopBar(
+                        title = "Status",
+                        showBack = true,
+                        onBack = { navigateBackOrHome(navController) },
+                        showRefresh = !lastRequestedUrl.isNullOrBlank(),
+                        onRefresh = refreshScan
+                    )
+                },
+                bottomBar = { OKBottomNav(navController) }
+            ) { innerPadding ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    VerifiedEmptyState(
+                        onOpenScan = {
+                            navController.navigate("scans") {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        }
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun VerifiedEmptyState(onOpenScan: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        color = ObsidianColors.SurfaceContainer.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.2f)),
+        shadowElevation = 12.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .background(ObsidianColors.Primary.copy(alpha = 0.12f), CircleShape)
+                    .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.18f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Verified, null, tint = ObsidianColors.Primary, modifier = Modifier.size(28.dp))
+            }
+            Text("No verified result yet", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Run a scan to view the latest verification status and security verdict.",
+                color = ObsidianColors.OnSurfaceVariant,
+                textAlign = TextAlign.Center,
+                lineHeight = 20.sp
+            )
+            PressableGradientActionButton(
+                text = "Open Scan",
+                icon = Icons.Default.Radar,
+                brush = ObsidianColors.KineticGradient,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onOpenScan
+            )
+        }
+    }
+}
+
+@Composable
+fun ShareScreenObsidian(navController: NavController, viewModel: SecurityViewModel) {
+    val context = LocalContext.current
+    val recentScans by viewModel.recentScans.observeAsState(emptyList())
+    val scanState by viewModel.scanState.observeAsState(ScanState.Idle)
+    val latestScan = recentScans.firstOrNull()
+    val activeScanUrl = (scanState as? ScanState.Success)?.url ?: latestScan?.url.orEmpty()
+    val shareSummary = buildString {
+        append("EyeShield scan update")
+        if (latestScan != null) {
+            append("\nURL: ${latestScan.url}")
+            append("\nStatus: ${latestScan.verdict}")
+            append("\nConfidence: ${latestScan.confidence}")
+            append("\nScanned at: ${latestScan.time}")
+        }
+    }
+
+    fun launchShare(payload: String) {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, payload)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Share with"))
+    }
+
+    Scaffold(
+        topBar = {
+            OKTopBar(
+                title = "Share",
+                showBack = true,
+                onBack = { navigateBackOrHome(navController) }
+            )
+        },
+        bottomBar = { OKBottomNav(navController) },
+        containerColor = ObsidianColors.Background
+    ) { innerPadding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 20.dp),
+            contentPadding = PaddingValues(top = 18.dp, bottom = 120.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            item {
+                Text("Share", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Share your latest EyeShield result or copy the most recent scanned link.",
+                    color = ObsidianColors.OnSurfaceVariant,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+            }
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(28.dp),
+                    color = ObsidianColors.SurfaceContainer.copy(alpha = 0.72f),
+                    border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.16f)),
+                    shadowElevation = 12.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .background(ObsidianColors.Primary.copy(alpha = 0.14f), RoundedCornerShape(14.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Share, null, tint = ObsidianColors.Primary, modifier = Modifier.size(20.dp))
+                            }
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Latest shareable status", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                                Text(
+                                    latestScan?.let { displaySiteLabel(it.url) } ?: "No recent scan available",
+                                    color = ObsidianColors.OnSurfaceVariant,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.8f),
+                            border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.18f))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ShareDetailRow("URL", latestScan?.url ?: "Scan a website to enable sharing")
+                                ShareDetailRow("Status", latestScan?.verdict?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Unavailable")
+                                ShareDetailRow("Confidence", latestScan?.confidence ?: "--")
+                                ShareDetailRow("Time", latestScan?.time ?: "--")
+                            }
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            PressableOutlinedActionButton(
+                                text = "Copy Link",
+                                icon = Icons.Default.ContentCopy,
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    if (activeScanUrl.isNotBlank()) {
+                                        val clipboard = context.getSystemService(ClipboardManager::class.java)
+                                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("shared_url", activeScanUrl))
+                                    }
+                                }
+                            )
+                            PressableGradientActionButton(
+                                text = "Share",
+                                icon = Icons.Default.Share,
+                                brush = ObsidianColors.KineticGradient,
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    launchShare(if (latestScan == null) "EyeShield is ready to scan and share secure browsing insights." else shareSummary)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ShareDetailRow(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label.uppercase(), color = ObsidianColors.OnSurfaceVariant, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+        Text(value, color = Color.White, fontSize = 14.sp, lineHeight = 19.sp)
     }
 }
 
@@ -1582,7 +2169,7 @@ fun ScansScreenObsidian(navController: NavController, viewModel: SecurityViewMod
                     onClick = {
                         selectedScan = null
                         viewModel.scanUrl(scan.url)
-                        navController.navigate("analysis") {
+                        navController.navigate("scan-progress") {
                             launchSingleTop = true
                         }
                     }
@@ -1608,7 +2195,23 @@ fun ScansScreenObsidian(navController: NavController, viewModel: SecurityViewMod
         )
     }
 
-    Scaffold(topBar = { OKTopBar(navController) }, bottomBar = { OKBottomNav(navController) }, containerColor = ObsidianColors.Background) { innerPadding ->
+    Scaffold(
+        topBar = {
+            OKTopBar(
+                title = "Scan",
+                showBack = false,
+                showRefresh = true,
+                onRefresh = {
+                    searchQuery = ""
+                    selectedFilter = "All"
+                    sortOption = "Latest"
+                    sortMenuExpanded = false
+                }
+            )
+        },
+        bottomBar = { OKBottomNav(navController) },
+        containerColor = ObsidianColors.Background
+    ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -1748,7 +2351,7 @@ fun ScansScreenObsidian(navController: NavController, viewModel: SecurityViewMod
                         index = index,
                         onClick = {
                             viewModel.scanUrl(scan.url)
-                            navController.navigate("analysis") {
+                            navController.navigate("scan-progress") {
                                 launchSingleTop = true
                             }
                         },
@@ -2074,183 +2677,242 @@ fun SettingsScreenObsidian(navController: NavController) {
     }
 
     Scaffold(
-        topBar = { OKTopBar(navController) },
+        topBar = {
+            OKTopBar(
+                title = "Settings",
+                showBack = true,
+                onBack = { navigateBackOrHome(navController) }
+            )
+        },
         bottomBar = { OKBottomNav(navController) },
         containerColor = ObsidianColors.Background
     ) { innerPadding ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 20.dp),
-            contentPadding = PaddingValues(top = 24.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
-        ) {
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text(
-                        "Manage protection, privacy, and app behavior with a streamlined security configuration.",
-                        color = ObsidianColors.OnSurfaceVariant,
-                        lineHeight = 20.sp
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF0B1220),
+                            Color(0xFF0E1524),
+                            Color(0xFF111827)
+                        )
                     )
-                }
-            }
+                )
+        ) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFF22D3EE).copy(alpha = 0.12f),
+                                Color.Transparent
+                            ),
+                            center = androidx.compose.ui.geometry.Offset(180f, 120f),
+                            radius = 420f
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(
+                                Color(0xFFA78BFA).copy(alpha = 0.1f),
+                                Color.Transparent
+                            ),
+                            center = androidx.compose.ui.geometry.Offset(880f, 540f),
+                            radius = 520f
+                        )
+                    )
+            )
 
-            item {
-                AnimatedVisibility(visible = clearDataMessage != null, enter = fadeIn(), exit = fadeOut()) {
-                    Surface(
-                        color = ObsidianColors.SurfaceContainerHigh,
-                        shape = RoundedCornerShape(18.dp),
-                        tonalElevation = 0.dp,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 20.dp),
+                contentPadding = PaddingValues(top = 28.dp, bottom = 36.dp),
+                verticalArrangement = Arrangement.spacedBy(22.dp)
+            ) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Settings", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text(
+                            "Manage protection, privacy, and app behavior with a premium security control center.",
+                            color = Color(0xFF9CA3AF),
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp
+                        )
+                    }
+                }
+
+                item {
+                    AnimatedVisibility(visible = clearDataMessage != null, enter = fadeIn(), exit = fadeOut()) {
+                        Surface(
+                            color = Color.Transparent,
+                            shape = RoundedCornerShape(20.dp),
+                            tonalElevation = 0.dp,
+                            shadowElevation = 10.dp,
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(34.dp)
-                                    .background(ObsidianColors.Safe.copy(alpha = 0.16f), CircleShape),
-                                contentAlignment = Alignment.Center
+                                    .fillMaxWidth()
+                                    .background(
+                                        Brush.linearGradient(
+                                            listOf(
+                                                Color.White.copy(alpha = 0.05f),
+                                                ObsidianColors.Safe.copy(alpha = 0.08f),
+                                                Color.Transparent
+                                            )
+                                        )
+                                    )
                             ) {
-                                Icon(Icons.Default.Check, null, tint = ObsidianColors.Safe, modifier = Modifier.size(18.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    SettingsGradientIconBox(icon = Icons.Default.Check, accent = ObsidianColors.Safe)
+                                    Text(clearDataMessage.orEmpty(), color = Color.White, fontWeight = FontWeight.Medium, fontSize = 15.sp)
+                                }
                             }
-                            Text(clearDataMessage.orEmpty(), color = Color.White, fontWeight = FontWeight.Medium)
                         }
                     }
                 }
-            }
 
-            item {
-                SettingsSectionCard(title = "Security Settings", icon = Icons.Default.Security) {
-                    SettingsToggleRow(
-                        title = "Safe Browsing",
-                        description = "Warn before potentially dangerous pages load.",
-                        icon = Icons.Default.TravelExplore,
-                        checked = safeBrowsing,
-                        onCheckedChange = { safeBrowsing = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Block Malicious Sites",
-                        description = "Prevent access to flagged phishing and malware destinations.",
-                        icon = Icons.Default.Block,
-                        checked = blockMaliciousSites,
-                        onCheckedChange = { blockMaliciousSites = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Enable Threat Alerts",
-                        description = "Surface immediate alerts when suspicious activity is detected.",
-                        icon = Icons.Default.NotificationImportant,
-                        checked = threatAlerts,
-                        onCheckedChange = { threatAlerts = it }
-                    )
+                item {
+                    SettingsSectionCard(title = "Security Settings", icon = Icons.Default.Security) {
+                        SettingsToggleRow(
+                            title = "Safe Browsing",
+                            description = "Warn before potentially dangerous pages load.",
+                            icon = Icons.Default.TravelExplore,
+                            checked = safeBrowsing,
+                            onCheckedChange = { safeBrowsing = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Block Malicious Sites",
+                            description = "Prevent access to flagged phishing and malware destinations.",
+                            icon = Icons.Default.Block,
+                            checked = blockMaliciousSites,
+                            onCheckedChange = { blockMaliciousSites = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Enable Threat Alerts",
+                            description = "Surface immediate alerts when suspicious activity is detected.",
+                            icon = Icons.Default.NotificationImportant,
+                            checked = threatAlerts,
+                            onCheckedChange = { threatAlerts = it }
+                        )
+                    }
                 }
-            }
 
-            item {
-                SettingsSectionCard(title = "Privacy", icon = Icons.Default.PrivacyTip) {
-                    SettingsActionRow(
-                        title = "Clear Browsing Data",
-                        description = "Delete cached pages, session traces, and temporary site data.",
-                        icon = Icons.Default.DeleteSweep,
-                        accentColor = ObsidianColors.Error,
-                        onClick = {
-                            clearDataMessage = null
-                            showClearDataDialog = true
-                        }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Enable Incognito Mode",
-                        description = "Reduce local browsing traces for private sessions.",
-                        icon = Icons.Default.VisibilityOff,
-                        checked = incognitoMode,
-                        onCheckedChange = { incognitoMode = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Do Not Track",
-                        description = "Request that supported websites limit tracking behavior.",
-                        icon = Icons.Default.GppGood,
-                        checked = doNotTrack,
-                        onCheckedChange = { doNotTrack = it }
-                    )
+                item {
+                    SettingsSectionCard(title = "Privacy", icon = Icons.Default.PrivacyTip) {
+                        SettingsActionRow(
+                            title = "Clear Browsing Data",
+                            description = "Delete cached pages, session traces, and temporary site data.",
+                            icon = Icons.Default.DeleteSweep,
+                            accentColor = ObsidianColors.Error,
+                            onClick = {
+                                clearDataMessage = null
+                                showClearDataDialog = true
+                            }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Enable Incognito Mode",
+                            description = "Reduce local browsing traces for private sessions.",
+                            icon = Icons.Default.VisibilityOff,
+                            checked = incognitoMode,
+                            onCheckedChange = { incognitoMode = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Do Not Track",
+                            description = "Request that supported websites limit tracking behavior.",
+                            icon = Icons.Default.GppGood,
+                            checked = doNotTrack,
+                            onCheckedChange = { doNotTrack = it }
+                        )
+                    }
                 }
-            }
 
-            item {
-                SettingsSectionCard(title = "App Settings", icon = Icons.Default.Tune) {
-                    SettingsToggleRow(
-                        title = "Dark Mode",
-                        description = "Keep the interface optimized for low-light use.",
-                        icon = Icons.Default.DarkMode,
-                        checked = darkMode,
-                        onCheckedChange = { darkMode = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Real-time Protection",
-                        description = "Continuously inspect active browsing sessions for risk.",
-                        icon = Icons.Default.GppMaybe,
-                        checked = realTimeProtection,
-                        onCheckedChange = { realTimeProtection = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Auto-update Database",
-                        description = "Refresh reputation intelligence and detection rules automatically.",
-                        icon = Icons.Default.SystemUpdateAlt,
-                        checked = autoUpdateDatabase,
-                        onCheckedChange = { autoUpdateDatabase = it }
-                    )
-                    SettingsDivider()
-                    SettingsToggleRow(
-                        title = "Notifications",
-                        description = "Receive app updates and security event notifications.",
-                        icon = Icons.Default.NotificationsActive,
-                        checked = notificationsEnabled,
-                        onCheckedChange = { notificationsEnabled = it }
-                    )
+                item {
+                    SettingsSectionCard(title = "App Settings", icon = Icons.Default.Tune) {
+                        SettingsToggleRow(
+                            title = "Dark Mode",
+                            description = "Keep the interface optimized for low-light use.",
+                            icon = Icons.Default.DarkMode,
+                            checked = darkMode,
+                            onCheckedChange = { darkMode = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Real-time Protection",
+                            description = "Continuously inspect active browsing sessions for risk.",
+                            icon = Icons.Default.GppMaybe,
+                            checked = realTimeProtection,
+                            onCheckedChange = { realTimeProtection = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Auto-update Database",
+                            description = "Refresh reputation intelligence and detection rules automatically.",
+                            icon = Icons.Default.SystemUpdateAlt,
+                            checked = autoUpdateDatabase,
+                            onCheckedChange = { autoUpdateDatabase = it }
+                        )
+                        SettingsDivider()
+                        SettingsToggleRow(
+                            title = "Notifications",
+                            description = "Receive app updates and security event notifications.",
+                            icon = Icons.Default.NotificationsActive,
+                            checked = notificationsEnabled,
+                            onCheckedChange = { notificationsEnabled = it }
+                        )
+                    }
                 }
-            }
 
-            item {
-                SettingsSectionCard(title = "Info", icon = Icons.Default.Info) {
-                    SettingsInfoRow(
-                        title = "App Version",
-                        value = appVersion,
-                        icon = Icons.Default.Info,
-                        showChevron = false,
-                        onClick = {}
-                    )
-                    SettingsDivider()
-                    SettingsInfoRow(
-                        title = "Privacy Policy",
-                        value = "Review how data is handled",
-                        icon = Icons.Default.Policy,
-                        onClick = { showPrivacyPolicyDialog = true }
-                    )
-                    SettingsDivider()
-                    SettingsInfoRow(
-                        title = "Terms & Conditions",
-                        value = "Usage terms and responsibilities",
-                        icon = Icons.Default.Description,
-                        onClick = { showTermsDialog = true }
-                    )
-                    SettingsDivider()
-                    SettingsInfoRow(
-                        title = "About App",
-                        value = "Product overview and purpose",
-                        icon = Icons.Default.Info,
-                        onClick = { showAboutDialog = true }
-                    )
+                item {
+                    SettingsSectionCard(title = "Info", icon = Icons.Default.Info) {
+                        SettingsInfoRow(
+                            title = "App Version",
+                            value = appVersion,
+                            icon = Icons.Default.Info,
+                            showChevron = false,
+                            onClick = {}
+                        )
+                        SettingsDivider()
+                        SettingsInfoRow(
+                            title = "Privacy Policy",
+                            value = "Review how data is handled",
+                            icon = Icons.Default.Policy,
+                            onClick = { showPrivacyPolicyDialog = true }
+                        )
+                        SettingsDivider()
+                        SettingsInfoRow(
+                            title = "Terms & Conditions",
+                            value = "Usage terms and responsibilities",
+                            icon = Icons.Default.Description,
+                            onClick = { showTermsDialog = true }
+                        )
+                        SettingsDivider()
+                        SettingsInfoRow(
+                            title = "About App",
+                            value = "Product overview and purpose",
+                            icon = Icons.Default.Info,
+                            onClick = { showAboutDialog = true }
+                        )
+                    }
                 }
             }
         }
@@ -2261,35 +2923,87 @@ fun SettingsScreenObsidian(navController: NavController) {
 fun SettingsSectionCard(title: String, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = ObsidianColors.SurfaceContainerLow,
-        shape = RoundedCornerShape(24.dp),
+        color = Color.Transparent,
+        shape = RoundedCornerShape(20.dp),
         tonalElevation = 0.dp,
-        border = BorderStroke(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.35f))
+        shadowElevation = 10.dp,
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-            content = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(bottom = 6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .background(ObsidianColors.Primary.copy(alpha = 0.12f), RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            Color.White.copy(alpha = 0.05f),
+                            Color.White.copy(alpha = 0.03f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                content = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.padding(bottom = 8.dp)
                     ) {
-                        Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(18.dp))
+                        SettingsGradientIconBox(icon = icon)
+                        Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 19.sp)
                     }
-                    Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    content()
                 }
-                content()
-            }
+            )
+        }
+    }
+}
+
+@Composable
+fun SettingsGradientIconBox(icon: ImageVector, accent: Color = ObsidianColors.Primary) {
+    Box(
+        modifier = Modifier.size(44.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(accent.copy(alpha = 0.12f), CircleShape)
+                .blur(10.dp)
         )
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .background(Color.White.copy(alpha = 0.04f), RoundedCornerShape(14.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                null,
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer(alpha = 0.99f)
+                    .drawWithCache {
+                        onDrawWithContent {
+                            drawContent()
+                            drawRect(
+                                Brush.linearGradient(
+                                    listOf(
+                                        Color(0xFF22D3EE),
+                                        Color(0xFFA78BFA)
+                                    )
+                                ),
+                                blendMode = androidx.compose.ui.graphics.BlendMode.SrcAtop
+                            )
+                        }
+                    }
+            )
+        }
     }
 }
 
@@ -2303,8 +3017,7 @@ fun SettingsToggleRow(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val rowScale by animateFloatAsState(if (pressed) 0.99f else 1f, tween(140), label = "settings_toggle_row_scale")
-    val iconScale by animateFloatAsState(if (checked) 1f else 0.92f, tween(220), label = "settings_toggle_icon_scale")
+    val rowScale by animateFloatAsState(if (pressed) 0.995f else 1f, tween(140), label = "settings_toggle_row_scale")
 
     Row(
         modifier = Modifier
@@ -2312,35 +3025,58 @@ fun SettingsToggleRow(
             .scale(rowScale)
             .clip(RoundedCornerShape(18.dp))
             .clickable(interactionSource = interactionSource, indication = null) { onCheckedChange(!checked) }
-            .padding(vertical = 10.dp),
+            .padding(vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        SettingsGradientIconBox(icon = icon, accent = if (checked) Color(0xFF22D3EE) else ObsidianColors.OnSurfaceVariant)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
+            Text(description, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
+        }
+        PremiumSettingsSwitch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+fun PremiumSettingsSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val thumbOffset by animateFloatAsState(if (checked) 20f else 0f, tween(180), label = "premium_switch_offset")
+    val glowAlpha by animateFloatAsState(if (checked) 0.22f else 0f, tween(180), label = "premium_switch_glow")
+
+    Box(
+        modifier = Modifier
+            .size(width = 50.dp, height = 30.dp)
+            .clip(RoundedCornerShape(100.dp))
+            .clickable(interactionSource = interactionSource, indication = null) { onCheckedChange(!checked) }
+    ) {
         Box(
             modifier = Modifier
-                .size(42.dp)
-                .scale(iconScale)
+                .matchParentSize()
                 .background(
-                    if (checked) ObsidianColors.Primary.copy(alpha = 0.14f) else ObsidianColors.SurfaceContainerHigh,
-                    RoundedCornerShape(14.dp)
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(icon, null, tint = if (checked) ObsidianColors.Primary else ObsidianColors.OnSurfaceVariant, modifier = Modifier.size(20.dp))
-        }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
-            Text(description, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = ObsidianColors.Primary,
-                checkedTrackColor = ObsidianColors.Primary.copy(alpha = 0.38f),
-                uncheckedThumbColor = ObsidianColors.OnSurfaceVariant,
-                uncheckedTrackColor = ObsidianColors.SurfaceBright
+                    if (checked) {
+                        Brush.horizontalGradient(listOf(Color(0xFF22D3EE), Color(0xFF3B82F6)))
+                    } else {
+                        Brush.horizontalGradient(listOf(Color(0xFF374151), Color(0xFF374151)))
+                    },
+                    RoundedCornerShape(100.dp)
+                )
+                .border(1.dp, Color.White.copy(alpha = if (checked) 0.14f else 0.06f), RoundedCornerShape(100.dp))
+        )
+        if (checked) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Color(0xFF22D3EE).copy(alpha = glowAlpha), RoundedCornerShape(100.dp))
+                    .blur(8.dp)
             )
+        }
+        Box(
+            modifier = Modifier
+                .padding(start = 4.dp, top = 4.dp)
+                .offset(x = thumbOffset.dp)
+                .size(22.dp)
+                .background(Color.White, CircleShape)
         )
     }
 }
@@ -2363,23 +3099,16 @@ fun SettingsActionRow(
             .scale(scale)
             .clip(RoundedCornerShape(18.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(vertical = 10.dp),
+            .padding(vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .background(accentColor.copy(alpha = 0.12f), RoundedCornerShape(14.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(icon, null, tint = accentColor, modifier = Modifier.size(20.dp))
-        }
+        SettingsGradientIconBox(icon = icon, accent = accentColor)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
-            Text(description, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
+            Text(description, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
         }
-        Icon(Icons.Default.ChevronRight, null, tint = ObsidianColors.OnSurfaceVariant)
+        Icon(Icons.Default.ChevronRight, null, tint = Color(0xFF9CA3AF))
     }
 }
 
@@ -2401,31 +3130,24 @@ fun SettingsInfoRow(
             .scale(scale)
             .clip(RoundedCornerShape(18.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(vertical = 10.dp),
+            .padding(vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .background(ObsidianColors.SurfaceContainerHigh, RoundedCornerShape(14.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(icon, null, tint = ObsidianColors.Primary, modifier = Modifier.size(20.dp))
-        }
+        SettingsGradientIconBox(icon = icon)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 16.sp)
-            Text(value, color = ObsidianColors.OnSurfaceVariant, fontSize = 13.sp, lineHeight = 18.sp)
+            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
+            Text(value, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
         }
         if (showChevron) {
-            Icon(Icons.Default.ChevronRight, null, tint = ObsidianColors.OnSurfaceVariant)
+            Icon(Icons.Default.ChevronRight, null, tint = Color(0xFF9CA3AF))
         }
     }
 }
 
 @Composable
 fun SettingsDivider() {
-    HorizontalDivider(color = ObsidianColors.OutlineVariant.copy(alpha = 0.45f), thickness = 1.dp)
+    HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 1.dp)
 }
 
 @Composable
@@ -2445,7 +3167,13 @@ fun SettingsInfoDialog(title: String, message: String, onDismiss: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OKTopBar(navController: NavController? = null) {
+fun OKTopBar(
+    title: String,
+    showBack: Boolean = false,
+    onBack: (() -> Unit)? = null,
+    showRefresh: Boolean = false,
+    onRefresh: (() -> Unit)? = null
+) {
     var visible by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -2455,7 +3183,8 @@ fun OKTopBar(navController: NavController? = null) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 10.dp)
+            .statusBarsPadding()
+            .padding(top = 4.dp)
             .animateContentSize()
     ) {
         AnimatedVisibility(
@@ -2466,26 +3195,33 @@ fun OKTopBar(navController: NavController? = null) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
-                    .height(36.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
+                    .height(48.dp)
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    Icons.Default.Shield,
-                    null,
-                    tint = ObsidianColors.Primary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
+                Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.CenterStart) {
+                    if (showBack && onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
+                        }
+                    }
+                }
                 Text(
-                    text = "EyeShield",
-                    color = ObsidianColors.OnBackground,
-                    fontWeight = FontWeight.Medium,
+                    text = title,
+                    color = Color.White,
                     fontSize = 17.sp,
-                    letterSpacing = (-0.2).sp,
-                    maxLines = 1
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f)
                 )
+                Box(modifier = Modifier.width(44.dp), contentAlignment = Alignment.CenterEnd) {
+                    if (showRefresh && onRefresh != null) {
+                        IconButton(onClick = onRefresh) {
+                            Icon(Icons.Default.Refresh, null, tint = ObsidianColors.Primary)
+                        }
+                    }
+                }
             }
         }
     }
@@ -2495,36 +3231,167 @@ fun OKTopBar(navController: NavController? = null) {
 fun OKBottomNav(navController: NavController) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val destinations = listOf(
+        BottomNavDestination("home", "Home", Icons.Default.Home),
+        BottomNavDestination("scans", "Scan", Icons.Default.Radar),
+        BottomNavDestination("settings", "Settings", Icons.Default.Settings)
+    )
+    val currentIndex = destinations.indexOfFirst { it.route == currentRoute }.takeIf { it >= 0 } ?: 0
+    var selectedIndex by rememberSaveable { mutableIntStateOf(currentIndex) }
 
-    NavigationBar(
-        containerColor = ObsidianColors.Background.copy(alpha = 0.6f), 
+    LaunchedEffect(currentRoute) {
+        selectedIndex = destinations.indexOfFirst { it.route == currentRoute }.takeIf { it >= 0 } ?: selectedIndex
+    }
+
+    Surface(
         modifier = Modifier
-            .clip(RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp))
-            .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.15f), RoundedCornerShape(topStart = 40.dp, topEnd = 40.dp))
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)),
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
+        shadowElevation = 10.dp
     ) {
-        NavigationBarItem(
-            selected = currentRoute == "home",
-            onClick = { navController.navigate("home") { popUpTo("home") { inclusive = true } } },
-            icon = { Icon(Icons.Default.Home, null) },
-            label = { Text("Home", fontSize = 10.sp) },
-            colors = NavigationBarItemDefaults.colors(selectedIconColor = ObsidianColors.Primary, selectedTextColor = ObsidianColors.Primary, unselectedIconColor = ObsidianColors.OnBackground.copy(alpha = 0.4f), unselectedTextColor = ObsidianColors.OnBackground.copy(alpha = 0.4f), indicatorColor = Color.Transparent)
-        )
-        NavigationBarItem(
-            selected = currentRoute == "scans",
-            onClick = { navController.navigate("scans") },
-            icon = { 
-                Box(modifier = Modifier.size(48.dp).background(if(currentRoute == "scans") ObsidianColors.SurfaceContainer else Color.Transparent, CircleShape), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Radar, null) 
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xB30F172A))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color(0xFF22D3EE).copy(alpha = 0.42f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            listOf(
+                                Color(0xFF22D3EE).copy(alpha = 0.08f),
+                                Color.Transparent
+                            ),
+                            center = androidx.compose.ui.geometry.Offset(220f, -20f),
+                            radius = 280f
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            listOf(
+                                Color(0xFFA78BFA).copy(alpha = 0.08f),
+                                Color.Transparent
+                            ),
+                            center = androidx.compose.ui.geometry.Offset(760f, 40f),
+                            radius = 320f
+                        )
+                    )
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                destinations.forEachIndexed { index, destination ->
+                    PremiumBottomNavItem(
+                        destination = destination,
+                        selected = selectedIndex == index,
+                        onClick = {
+                            selectedIndex = index
+                            navigateToBottomDestination(navController, destination.route)
+                        }
+                    )
                 }
-            },
-            label = { Text("Scans", fontSize = 10.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+fun RowScope.PremiumBottomNavItem(destination: BottomNavDestination, selected: Boolean, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pillAlpha by animateFloatAsState(if (selected) 1f else 0f, tween(240), label = "premium_nav_pill_alpha_${destination.route}")
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) Color.White else Color(0xFF9CA3AF),
+        animationSpec = tween(240),
+        label = "premium_nav_content_${destination.route}"
+    )
+
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color(0xFF22D3EE).copy(alpha = 0.22f * pillAlpha),
+                            Color(0xFFA78BFA).copy(alpha = 0.26f * pillAlpha)
+                        )
+                    ),
+                    RoundedCornerShape(18.dp)
+                )
+                .border(
+                    1.dp,
+                    Color.White.copy(alpha = 0.08f * pillAlpha),
+                    RoundedCornerShape(18.dp)
+                )
         )
-        NavigationBarItem(
-            selected = currentRoute == "settings",
-            onClick = { navController.navigate("settings") },
-            icon = { Icon(Icons.Default.Settings, null) },
-            label = { Text("Settings", fontSize = 10.sp) }
-        )
+        Column(
+            modifier = Modifier.padding(vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(destination.icon, destination.label, tint = contentColor, modifier = Modifier.size(21.dp))
+            Text(destination.label, color = contentColor, fontSize = 11.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
+        }
+    }
+}
+
+data class BottomNavDestination(
+    val route: String,
+    val label: String,
+    val icon: ImageVector
+)
+
+private fun navigateBackOrHome(navController: NavController) {
+    if (!navController.popBackStack()) {
+        navController.navigate("home") {
+            popUpTo(navController.graph.findStartDestination().id) {
+                saveState = true
+            }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+}
+
+private fun navigateToBottomDestination(navController: NavController, route: String) {
+    navController.navigate(route) {
+        popUpTo(navController.graph.findStartDestination().id) {
+            saveState = true
+        }
+        launchSingleTop = true
+        restoreState = true
     }
 }
 
@@ -2536,7 +3403,6 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
     var currentUrl by remember(url) { mutableStateOf(url) }
     var pendingUrl by remember(url) { mutableStateOf(url) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var canGoBack by remember { mutableStateOf(false) }
     var canGoForward by remember { mutableStateOf(false) }
     var blockedError by remember { mutableStateOf<String?>(null) }
     val secureConnection = currentUrl.startsWith("https://")
@@ -2564,21 +3430,17 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         BrowserControlIconButton(
-                            icon = Icons.AutoMirrored.Filled.ArrowBack,
+                            icon = Icons.Default.Home,
                             enabled = true,
                             highlight = false,
-                            contentDescription = "Back",
+                            contentDescription = "Home",
                             onClick = {
-                                val view = webViewRef
-                                if (view?.canGoBack() == true) {
-                                    view.goBack()
-                                    syncBrowserState(view) { back, forward, liveUrl ->
-                                        canGoBack = back
-                                        canGoForward = forward
-                                        currentUrl = liveUrl
+                                navController.navigate("home") {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
                                     }
-                                } else {
-                                    navController.popBackStack()
+                                    launchSingleTop = true
+                                    restoreState = true
                                 }
                             }
                         )
@@ -2656,8 +3518,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                                 progress = newProgress
                                                 view?.let { browser ->
-                                                    syncBrowserState(browser) { back, forward, liveUrl ->
-                                                        canGoBack = back
+                                                    syncBrowserState(browser) { _, forward, liveUrl ->
                                                         canGoForward = forward
                                                         currentUrl = liveUrl
                                                     }
@@ -2671,8 +3532,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                                 pendingUrl = url ?: pendingUrl
                                                 currentUrl = url ?: currentUrl
                                                 view?.let { browser ->
-                                                    syncBrowserState(browser) { back, forward, liveUrl ->
-                                                        canGoBack = back
+                                                    syncBrowserState(browser) { _, forward, liveUrl ->
                                                         canGoForward = forward
                                                         currentUrl = liveUrl
                                                     }
@@ -2683,9 +3543,9 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                                 super.onPageFinished(view, url)
                                                 progress = 100
                                                 currentUrl = url ?: currentUrl
+                                                view?.clearHistory()
                                                 view?.let { browser ->
-                                                    syncBrowserState(browser) { back, forward, liveUrl ->
-                                                        canGoBack = back
+                                                    syncBrowserState(browser) { _, forward, liveUrl ->
                                                         canGoForward = forward
                                                         currentUrl = liveUrl
                                                     }
@@ -2698,8 +3558,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                                     blockedError = error?.description?.toString() ?: "ERR_NAME_NOT_RESOLVED"
                                                     pendingUrl = request?.url?.toString() ?: pendingUrl
                                                     view?.let { browser ->
-                                                        syncBrowserState(browser) { back, forward, liveUrl ->
-                                                            canGoBack = back
+                                                        syncBrowserState(browser) { _, forward, liveUrl ->
                                                             canGoForward = forward
                                                             currentUrl = liveUrl
                                                         }
@@ -2737,14 +3596,21 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                             } else {
                                                 view.reload()
                                             }
-                                            syncBrowserState(view) { back, forward, liveUrl ->
-                                                canGoBack = back
+                                            syncBrowserState(view) { _, forward, liveUrl ->
                                                 canGoForward = forward
                                                 currentUrl = liveUrl
                                             }
                                         }
                                     },
-                                    onCheckSecurity = { navController.popBackStack() }
+                                    onCheckSecurity = {
+                                        navController.navigate("home") {
+                                            popUpTo(navController.graph.findStartDestination().id) {
+                                                saveState = true
+                                            }
+                                            launchSingleTop = true
+                                            restoreState = true
+                                        }
+                                    }
                                 )
                             }
                         }
@@ -2766,20 +3632,18 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     BrowserControlIconButton(
-                        icon = Icons.AutoMirrored.Filled.ArrowBack,
-                        enabled = canGoBack,
+                        icon = Icons.Default.Home,
+                        enabled = true,
                         highlight = false,
-                        contentDescription = "Back",
+                        contentDescription = "Home",
                         onClick = {
-                            Log.d("EyeShielD-Browser", "Back button clicked")
-                            val view = webViewRef
-                            if (view?.canGoBack() == true) {
-                                view.goBack()
-                                syncBrowserState(view) { back, forward, liveUrl ->
-                                    canGoBack = back
-                                    canGoForward = forward
-                                    currentUrl = liveUrl
+                            Log.d("EyeShielD-Browser", "Home button clicked")
+                            navController.navigate("home") {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
                                 }
+                                launchSingleTop = true
+                                restoreState = true
                             }
                         }
                     )
@@ -2793,8 +3657,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                             val view = webViewRef
                             if (view?.canGoForward() == true) {
                                 view.goForward()
-                                syncBrowserState(view) { back, forward, liveUrl ->
-                                    canGoBack = back
+                                syncBrowserState(view) { _, forward, liveUrl ->
                                     canGoForward = forward
                                     currentUrl = liveUrl
                                 }
@@ -2819,8 +3682,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                 } else {
                                     view.reload()
                                 }
-                                syncBrowserState(view) { back, forward, liveUrl ->
-                                    canGoBack = back
+                                syncBrowserState(view) { _, forward, liveUrl ->
                                     canGoForward = forward
                                     currentUrl = liveUrl
                                 }
@@ -2853,7 +3715,7 @@ private fun syncBrowserState(
     onUpdate: (canGoBack: Boolean, canGoForward: Boolean, currentUrl: String) -> Unit
 ) {
     onUpdate(
-        webView.canGoBack(),
+        false,
         webView.canGoForward(),
         webView.getUrl() ?: ""
     )

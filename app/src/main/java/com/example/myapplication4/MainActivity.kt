@@ -55,13 +55,18 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.LiveData
@@ -90,6 +95,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
+import androidx.core.net.toUri
 
 // ═════════════════════════════════════════════
 // OBSIDIAN KINETIC COLOR PALETTE
@@ -120,13 +126,15 @@ object ObsidianColors {
     val TertiaryDim = Color(0xFF759AFF)
     val OnTertiary = Color(0xFF002363)
     
-    val Error = Color(0xFFFF716C)
-    val ErrorDim = Color(0xFFD7383B)
-    val ErrorContainer = Color(0xFF9F0519)
+    val Error = Color(0xFFEF4444)
+    val ErrorDim = Color(0xFFDC2626)
+    val ErrorContainer = Color(0x26EF4444)
     val OnError = Color(0xFF490006)
     
-    val Safe = Color(0xFF10B981)
+    val Safe = Color(0xFF22C55E)
     val Warning = Color(0xFFF59E0B)
+    val SafeContainer = Color(0x2622C55E)
+    val WarningContainer = Color(0x26F59E0B)
     
     val Outline = Color(0xFF727580)
     val OutlineVariant = Color(0xFF444852)
@@ -134,9 +142,9 @@ object ObsidianColors {
     val InverseOnSurface = Color(0xFF51555F)
     
     val KineticGradient = Brush.linearGradient(listOf(Primary, Secondary))
-    val VerdictSafeGradient = Brush.linearGradient(listOf(Color(0xFF10B981), Color(0xFF064E3B)))
-    val VerdictWarningGradient = Brush.linearGradient(listOf(Color(0xFFF59E0B), Color(0xFF78350F)))
-    val VerdictDangerGradient = Brush.linearGradient(listOf(Error, Color(0xFF7F1D1D)))
+    val VerdictSafeGradient = Brush.linearGradient(listOf(Safe, Color(0xFF5BE584)))
+    val VerdictWarningGradient = Brush.linearGradient(listOf(Warning, Color(0xFFFFB340)))
+    val VerdictDangerGradient = Brush.linearGradient(listOf(Error, ErrorDim))
 }
 
 // ═════════════════════════════════════════════
@@ -309,6 +317,9 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
     var urlInput by remember { mutableStateOf("") }
     var homeMessage by remember { mutableStateOf<String?>(null) }
     var showTipCard by remember { mutableStateOf(true) }
+    val focusRequester = remember { FocusRequester() }
+    val homeBackStackEntry = remember(navController) { navController.getBackStackEntry("home") }
+    val shouldFocusUrlInput by homeBackStackEntry.savedStateHandle.getStateFlow("focus_url_input", false).collectAsState()
     val scanButtonInteraction = remember { MutableInteractionSource() }
     val scanButtonPressed by scanButtonInteraction.collectIsPressedAsState()
     val scanButtonScale by animateFloatAsState(if (scanButtonPressed) 0.97f else 1f, tween(120), label = "home_scan_button_scale")
@@ -320,6 +331,15 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
     LaunchedEffect(recentItems.isNotEmpty()) {
         if (recentItems.isNotEmpty()) {
             showTipCard = false
+        }
+    }
+
+    LaunchedEffect(shouldFocusUrlInput) {
+        if (shouldFocusUrlInput) {
+            urlInput = ""
+            homeMessage = null
+            focusRequester.requestFocus()
+            homeBackStackEntry.savedStateHandle["focus_url_input"] = false
         }
     }
 
@@ -356,7 +376,7 @@ fun HomeScreenObsidian(navController: NavController, viewModel: SecurityViewMode
                         BasicTextField(
                             value = urlInput,
                             onValueChange = { urlInput = it },
-                            modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
+                            modifier = Modifier.weight(1f).padding(horizontal = 14.dp).focusRequester(focusRequester),
                             textStyle = TextStyle(color = Color.White, fontSize = 16.sp),
                             decorationBox = { innerTextField ->
                                 if (urlInput.isEmpty()) Text("Enter or paste URL", color = ObsidianColors.OnSurfaceVariant.copy(alpha = 0.5f))
@@ -1422,21 +1442,189 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
         }
         is ScanState.Success -> {
             val success = scanState as ScanState.Success
-            val verdict = success.analysis.verdict.uppercase()
-            val isDangerous = verdict == "DANGER" || verdict == "DANGEROUS" || verdict == "MALICIOUS"
-            val isWarning = verdict == "WARNING" || verdict == "SUSPICIOUS"
-            val verdictGradient = if (isDangerous) ObsidianColors.VerdictDangerGradient else if (isWarning) ObsidianColors.VerdictWarningGradient else ObsidianColors.VerdictSafeGradient
-            val verdictColor = if (isDangerous) ObsidianColors.Error else if (isWarning) ObsidianColors.Warning else ObsidianColors.Safe
-            val riskSummaryPoints = remember {
-                listOf(
-                    "Website scanned successfully",
-                    "No threats detected",
-                    "Verified by 69 security engines"
+            val riskEvaluation = remember(success.url, success.vtStats) {
+                evaluateCyberRisk(
+                    url = success.url,
+                    vtStats = success.vtStats
+                )
+            }
+            val verdict = riskEvaluation.verdict
+            val enginesChecked = riskEvaluation.totalEngines
+            val isDangerous = verdict == "HIGH_RISK"
+            val isMediumRisk = verdict == "MEDIUM_RISK"
+            val isCaution = verdict == "CAUTION"
+            val isWarning = isMediumRisk || isCaution
+            val isUnsafe = isDangerous || isWarning
+            val maliciousCount = success.vtStats.malicious
+            val suspiciousCount = success.vtStats.suspicious
+            val harmlessCount = success.vtStats.harmless
+            val undetectedCount = success.vtStats.undetected
+            val haptic = LocalHapticFeedback.current
+            var reputationSheet by remember { mutableStateOf<ReputationSheetState?>(null) }
+            val verdictColor = when {
+                isDangerous -> ObsidianColors.Error
+                isWarning -> ObsidianColors.Warning
+                else -> ObsidianColors.Safe
+            }
+            val connectionLabel = riskEvaluation.connectionMessage
+            val vtRiskScore = riskEvaluation.flaggedEngines
+            val riskLevelLabel = when {
+                isDangerous -> "HIGH RISK"
+                isMediumRisk -> "MEDIUM RISK"
+                isCaution -> "CAUTION"
+                else -> "SAFE"
+            }
+            val flaggedEngineCount = riskEvaluation.flaggedEngines
+            val trustedOverrideActive = riskEvaluation.isTrustedDomain && verdict == "SAFE" && flaggedEngineCount > 0
+            val statusLabel = riskLevelLabel
+            val statusTitle = riskEvaluation.title
+            val statusSubtitle = riskEvaluation.summary
+            val statusSupportText = riskEvaluation.limitedDataMessage ?: if (trustedOverrideActive) "Trusted domain override applied" else connectionLabel
+            val statusBadgeText = riskEvaluation.limitedDataMessage?.uppercase() ?: "$enginesChecked ENGINES"
+            val maliciousEngineText = when (maliciousCount) {
+                1 -> "1 engine flagged as malicious"
+                0 -> null
+                else -> "$maliciousCount engines flagged as malicious"
+            }
+            val suspiciousEngineText = when (suspiciousCount) {
+                1 -> "1 suspicious indicator detected"
+                0 -> null
+                else -> "$suspiciousCount suspicious indicators detected"
+            }
+            val harmlessEngineText = when (harmlessCount) {
+                1 -> "1 engine marked harmless"
+                0 -> null
+                else -> "$harmlessCount engines marked harmless"
+            }
+            var showProceedRiskDialog by remember { mutableStateOf(false) }
+            val summaryItems = remember(
+                maliciousCount,
+                suspiciousCount,
+                harmlessCount,
+                undetectedCount,
+                connectionLabel,
+                riskEvaluation.limitedDataMessage
+            ) {
+                buildList {
+                    if (maliciousEngineText != null) {
+                        add(
+                            AiSummaryItem(
+                                icon = Icons.Default.ErrorOutline,
+                                tint = ObsidianColors.Error,
+                                text = maliciousEngineText
+                            )
+                        )
+                    }
+                    if (suspiciousEngineText != null) {
+                        add(
+                            AiSummaryItem(
+                                icon = Icons.Default.WarningAmber,
+                                tint = ObsidianColors.Warning,
+                                text = suspiciousEngineText
+                            )
+                        )
+                    }
+                    if (harmlessEngineText != null) {
+                        add(
+                            AiSummaryItem(
+                                icon = Icons.Default.Check,
+                                tint = ObsidianColors.Safe,
+                                text = harmlessEngineText
+                            )
+                        )
+                    }
+                    if (undetectedCount > 0) {
+                        add(
+                            AiSummaryItem(
+                                icon = Icons.Default.Info,
+                                tint = Color.White.copy(alpha = 0.72f),
+                                text = if (undetectedCount == 1) "1 engine returned undetected" else "$undetectedCount engines returned undetected"
+                            )
+                        )
+                    }
+
+                    add(
+                        AiSummaryItem(
+                            icon = if (connectionLabel.startsWith("Secure")) Icons.Default.Check else Icons.Default.WarningAmber,
+                            tint = if (connectionLabel.startsWith("Secure")) ObsidianColors.Safe else ObsidianColors.Warning,
+                            text = connectionLabel
+                        )
+                    )
+
+                    riskEvaluation.limitedDataMessage?.let {
+                        add(
+                            AiSummaryItem(
+                                icon = Icons.Default.Info,
+                                tint = ObsidianColors.Warning,
+                                text = it
+                            )
+                        )
+                    }
+                }
+            }
+            val safeActionBrush = Brush.horizontalGradient(listOf(ScanResultVisuals.SafeButtonStart, ScanResultVisuals.SafeButtonEnd))
+            val recommendedActionBrush = when {
+                isDangerous -> Brush.horizontalGradient(listOf(ScanResultVisuals.HighRiskButtonStart, ScanResultVisuals.HighRiskButtonEnd))
+                isUnsafe -> Brush.horizontalGradient(listOf(ScanResultVisuals.CautionButtonStart, ScanResultVisuals.CautionButtonEnd))
+                else -> Brush.horizontalGradient(listOf(ScanResultVisuals.SafeButtonStart, ScanResultVisuals.SafeButtonEnd))
+            }
+            val primaryButtonGlowColor = when {
+                isDangerous -> ScanResultVisuals.HighRiskButtonEnd
+                isUnsafe -> ScanResultVisuals.CautionButtonEnd
+                else -> ScanResultVisuals.SafeButtonEnd
+            }
+            val proceedToSite = {
+                val encodedUrl = URLEncoder.encode(success.url, StandardCharsets.UTF_8.toString())
+                navController.navigate("webview/$encodedUrl")
+            }
+
+            if (showProceedRiskDialog) {
+                AlertDialog(
+                    onDismissRequest = { showProceedRiskDialog = false },
+                    containerColor = ObsidianColors.SurfaceContainer,
+                    title = { Text("Are you sure?", color = Color.White) },
+                    text = { Text(riskEvaluation.recommendation, color = ObsidianColors.OnSurfaceVariant) },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                showProceedRiskDialog = false
+                                proceedToSite()
+                            }
+                        ) {
+                            Text("Continue Anyway", color = verdictColor)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showProceedRiskDialog = false }) {
+                            Text("Go Back (Recommended)", color = ObsidianColors.OnSurfaceVariant)
+                        }
+                    }
+                )
+            }
+
+            reputationSheet?.let { sheetState ->
+                ReputationDetailSheet(
+                    state = sheetState,
+                    onDismiss = { reputationSheet = null },
+                    onGoBack = {
+                        reputationSheet = null
+                        viewModel.reset()
+                        navigateHomeSafely(navController)
+                    },
+                    onContinue = {
+                        reputationSheet = null
+                        if (sheetState.kind == ReputationKind.Suspicious) {
+                            showProceedRiskDialog = true
+                        } else {
+                            proceedToSite()
+                        }
+                    },
+                    onViewDetails = { reputationSheet = null }
                 )
             }
 
             Scaffold(
-                containerColor = ObsidianColors.Background,
+                containerColor = ScanResultVisuals.ScreenBase,
                 topBar = {
                     OKTopBar(
                         title = "Status",
@@ -1451,158 +1639,123 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    ObsidianColors.Background,
-                                    ObsidianColors.SurfaceContainerLowest,
-                                    ObsidianColors.Background
-                                )
-                            )
-                        )
                 ) {
+                    AnalysisScreenBackdrop(modifier = Modifier.matchParentSize())
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
-                            .padding(horizontal = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(22.dp)
+                            .padding(horizontal = 20.dp),
+                        contentPadding = PaddingValues(top = 16.dp, bottom = 32.dp),
+                        verticalArrangement = Arrangement.spacedBy(24.dp)
                     ) {
                         item {
-                            Spacer(modifier = Modifier.height(10.dp))
                             PremiumVerdictCard(
-                                verdict = verdict,
-                                summary = success.analysis.summary,
+                                label = statusLabel,
+                                title = statusTitle,
+                                subtitle = statusSubtitle,
+                                supportingText = statusSupportText,
+                                badgeText = statusBadgeText,
                                 verdictColor = verdictColor,
-                                verdictGradient = verdictGradient,
                                 isDangerous = isDangerous,
                                 isWarning = isWarning
                             )
                         }
                         item {
-                            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                                ConfidenceLevelCard(success.analysis.confidenceScore)
-                                CleanStatusCard(
-                                    title = if (isDangerous) "Threat Signals Detected" else if (isWarning) "Caution Signals Present" else "Clean Status",
-                                    subtitle = if (isDangerous) "Manual review recommended" else if (isWarning) "Low-risk anomalies observed" else "AI Verified Clean",
-                                    accent = verdictColor
-                                )
-                            }
+                            ConfidenceLevelCard(
+                                flaggedEngines = vtRiskScore,
+                                totalEngines = enginesChecked,
+                                title = "Risk Level",
+                                riskLevel = riskLevelLabel,
+                                accent = verdictColor,
+                                icon = if (isDangerous) Icons.Default.GppBad else if (isWarning) Icons.Default.WarningAmber else Icons.Default.VerifiedUser
+                            )
                         }
                         item {
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Text("GLOBAL REPUTATION", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ObsidianColors.OnSurfaceVariant, letterSpacing = 2.sp)
-                                LazyRow(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                    contentPadding = PaddingValues(end = 4.dp)
-                                ) {
-                                    item {
-                                        ReputationCard("Malicious", "${success.vtStats.malicious}", ObsidianColors.Error, Icons.Default.BugReport, Modifier.width(108.dp))
+                                Text("GLOBAL REPUTATION", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.60f), letterSpacing = 2.sp)
+                                GlobalReputationOverviewCard(
+                                    maliciousCount = maliciousCount,
+                                    suspiciousCount = suspiciousCount,
+                                    harmlessCount = harmlessCount,
+                                    onMaliciousClick = {
+                                        reputationSheet = ReputationSheetState(
+                                            kind = ReputationKind.Malicious,
+                                            title = if (maliciousCount > 0) "Malicious Detections" else "No Malicious Hits",
+                                            description = if (maliciousCount > 0) riskEvaluation.summary else "No malicious detections reported",
+                                            recommendation = if (maliciousCount > 0) "Do not continue to this website." else "No malicious detections reported",
+                                            countLabel = "Detections",
+                                            countValue = maliciousCount,
+                                            detailLabel = "Engine count",
+                                            detailValue = if (maliciousCount > 0) "$maliciousCount malicious detections" else "None detected",
+                                            accent = ObsidianColors.Error,
+                                            icon = Icons.Default.WarningAmber,
+                                            primaryButton = "Go Back",
+                                            secondaryButton = "View Details"
+                                        )
+                                    },
+                                    onSuspiciousClick = {
+                                        reputationSheet = ReputationSheetState(
+                                            kind = ReputationKind.Suspicious,
+                                            title = "Suspicious Activity",
+                                            description = if (suspiciousCount > 0) riskEvaluation.summary else "No suspicious detections reported",
+                                            recommendation = "Proceed with caution",
+                                            countLabel = "Detections",
+                                            countValue = suspiciousCount,
+                                            detailLabel = "Engine count",
+                                            detailValue = if (suspiciousCount > 0) "$suspiciousCount suspicious detections" else "No suspicious detections reported",
+                                            accent = ObsidianColors.Warning,
+                                            icon = Icons.Default.WarningAmber,
+                                            primaryButton = "Go Back",
+                                            secondaryButton = "Continue Anyway"
+                                        )
+                                    },
+                                    onCleanClick = {
+                                        reputationSheet = ReputationSheetState(
+                                            kind = ReputationKind.Clean,
+                                            title = "Safe Website",
+                                            description = if (harmlessCount > 0) riskEvaluation.summary else "No harmless detections reported",
+                                            recommendation = "Safe to proceed",
+                                            countLabel = "Engines checked",
+                                            countValue = enginesChecked,
+                                            detailLabel = "Harmless count",
+                                            detailValue = harmlessCount.toString(),
+                                            accent = ObsidianColors.Safe,
+                                            icon = Icons.Default.Verified,
+                                            primaryButton = "Continue",
+                                            secondaryButton = null
+                                        )
                                     }
-                                    item {
-                                        ReputationCard("Suspicious", "${success.vtStats.suspicious}", ObsidianColors.Warning, Icons.Default.WarningAmber, Modifier.width(108.dp))
-                                    }
-                                    item {
-                                        ReputationCard("Clean", "${success.vtStats.harmless}", ObsidianColors.Safe, Icons.Default.Verified, Modifier.width(108.dp))
-                                    }
-                                }
+                                )
                             }
                         }
                         item {
-                            var expanded by remember { mutableStateOf(true) }
-                            Surface(
+                            SecuritySummaryCard(summaryItems = summaryItems.distinctBy { it.text }.take(5))
+                        }
+                        item {
+                            StatusPrimaryActions(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(28.dp),
-                                color = ObsidianColors.SurfaceContainer.copy(alpha = 0.66f),
-                                border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.14f)),
-                                shadowElevation = 10.dp
-                            ) {
-                                Column(modifier = Modifier.animateContentSize()) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable { expanded = !expanded }
-                                            .padding(horizontal = 22.dp, vertical = 18.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                            Box(modifier = Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(ObsidianColors.KineticGradient), contentAlignment = Alignment.Center) {
-                                                Icon(Icons.Default.Psychology, null, tint = Color.Black, modifier = Modifier.size(18.dp))
-                                            }
-                                            Text("AI Risk Summary", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 18.sp)
-                                        }
-                                        Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = ObsidianColors.OnSurfaceVariant)
+                                isUnsafe = isUnsafe,
+                                primaryBrush = if (isUnsafe) recommendedActionBrush else safeActionBrush,
+                                primaryGlowColor = primaryButtonGlowColor,
+                                onPrimaryClick = {
+                                    if (isUnsafe) {
+                                        viewModel.reset()
+                                        navigateHomeSafely(navController)
+                                    } else {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        proceedToSite()
                                     }
-                                    AnimatedVisibility(
-                                        visible = expanded,
-                                        enter = fadeIn() + expandVertically(),
-                                        exit = fadeOut() + shrinkVertically()
-                                    ) {
-                                        Column(
-                                            modifier = Modifier
-                                                .padding(start = 22.dp, end = 22.dp, bottom = 22.dp)
-                                                .fillMaxWidth()
-                                                .background(ObsidianColors.SurfaceContainerLow.copy(alpha = 0.72f), RoundedCornerShape(18.dp))
-                                                .border(1.dp, ObsidianColors.OutlineVariant.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
-                                                .padding(horizontal = 20.dp, vertical = 22.dp),
-                                            verticalArrangement = Arrangement.spacedBy(14.dp)
-                                        ) {
-                                            riskSummaryPoints.forEach { point ->
-                                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .padding(top = 2.dp)
-                                                            .size(24.dp)
-                                                            .background(ObsidianColors.Primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-                                                            .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                                            .shadow(8.dp, RoundedCornerShape(8.dp), ambientColor = ObsidianColors.Primary.copy(alpha = 0.18f), spotColor = ObsidianColors.Primary.copy(alpha = 0.18f)),
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        Icon(Icons.Default.Check, null, tint = ObsidianColors.Primary, modifier = Modifier.size(14.dp))
-                                                    }
-                                                    Text(point, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, lineHeight = 24.sp)
-                                                }
-                                            }
-                                        }
+                                },
+                                onSecondaryClick = {
+                                    if (isUnsafe) {
+                                        showProceedRiskDialog = true
+                                    } else {
+                                        viewModel.reset()
+                                        navigateHomeForNewScan(navController)
                                     }
                                 }
-                            }
-                        }
-                        item {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 120.dp),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                PressableOutlinedActionButton(
-                                    text = "Scan Another",
-                                    icon = Icons.Default.Radar,
-                                    modifier = Modifier.weight(1f),
-                                    onClick = {
-                                        viewModel.reset()
-                                        navController.navigate("home") {
-                                            popUpTo(navController.graph.findStartDestination().id) {
-                                                saveState = true
-                                            }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                )
-                                PressableGradientActionButton(
-                                    text = "Continue",
-                                    icon = Icons.AutoMirrored.Filled.ArrowForward,
-                                    brush = verdictGradient,
-                                    modifier = Modifier.weight(1f),
-                                    onClick = {
-                                        val encodedUrl = URLEncoder.encode(success.url, StandardCharsets.UTF_8.toString())
-                                        navController.navigate("webview/$encodedUrl")
-                                    }
-                                )
-                            }
+                            )
                         }
                     }
                 }
@@ -1665,82 +1818,10 @@ fun AnalysisScreenObsidian(navController: NavController, viewModel: SecurityView
             }
         }
         else -> {
-            Scaffold(
-                containerColor = ObsidianColors.Background,
-                topBar = {
-                    OKTopBar(
-                        title = "Status",
-                        showBack = true,
-                        onBack = { navigateBackOrHome(navController) },
-                        showRefresh = !lastRequestedUrl.isNullOrBlank(),
-                        onRefresh = refreshScan
-                    )
-                },
-                bottomBar = { OKBottomNav(navController) }
-            ) { innerPadding ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(horizontal = 24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    VerifiedEmptyState(
-                        onOpenScan = {
-                            navController.navigate("scans") {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
-                                }
-                                launchSingleTop = true
-                                restoreState = true
-                            }
-                        }
-                    )
-                }
+            LaunchedEffect(Unit) {
+                navigateHomeSafely(navController)
             }
-        }
-    }
-}
-
-@Composable
-fun VerifiedEmptyState(onOpenScan: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = ObsidianColors.SurfaceContainer.copy(alpha = 0.72f),
-        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.2f)),
-        shadowElevation = 12.dp
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .background(ObsidianColors.Primary.copy(alpha = 0.12f), CircleShape)
-                    .border(1.dp, ObsidianColors.Primary.copy(alpha = 0.18f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Verified, null, tint = ObsidianColors.Primary, modifier = Modifier.size(28.dp))
-            }
-            Text("No verified result yet", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text(
-                "Run a scan to view the latest verification status and security verdict.",
-                color = ObsidianColors.OnSurfaceVariant,
-                textAlign = TextAlign.Center,
-                lineHeight = 20.sp
-            )
-            PressableGradientActionButton(
-                text = "Open Scan",
-                icon = Icons.Default.Radar,
-                brush = ObsidianColors.KineticGradient,
-                modifier = Modifier.fillMaxWidth(),
-                onClick = onOpenScan
-            )
+            Box(modifier = Modifier.fillMaxSize())
         }
     }
 }
@@ -1757,7 +1838,7 @@ fun ShareScreenObsidian(navController: NavController, viewModel: SecurityViewMod
         if (latestScan != null) {
             append("\nURL: ${latestScan.url}")
             append("\nStatus: ${latestScan.verdict}")
-            append("\nConfidence: ${latestScan.confidence}")
+            append("\nEngines: ${latestScan.confidence}")
             append("\nScanned at: ${latestScan.time}")
         }
     }
@@ -1846,7 +1927,7 @@ fun ShareScreenObsidian(navController: NavController, viewModel: SecurityViewMod
                             ) {
                                 ShareDetailRow("URL", latestScan?.url ?: "Scan a website to enable sharing")
                                 ShareDetailRow("Status", latestScan?.verdict?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Unavailable")
-                                ShareDetailRow("Confidence", latestScan?.confidence ?: "--")
+                                ShareDetailRow("Engines", latestScan?.confidence ?: "--")
                                 ShareDetailRow("Time", latestScan?.time ?: "--")
                             }
                         }
@@ -1889,7 +1970,7 @@ fun ShareDetailRow(label: String, value: String) {
 }
 
 @Composable
-fun ReputationCard(label: String, value: String, color: Color, icon: ImageVector, modifier: Modifier) {
+fun ReputationCard(label: String, value: String, color: Color, icon: ImageVector, modifier: Modifier, onClick: () -> Unit) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, tween(140), label = "rep_scale")
@@ -1898,12 +1979,12 @@ fun ReputationCard(label: String, value: String, color: Color, icon: ImageVector
         modifier = modifier.scale(scale),
         shape = RoundedCornerShape(22.dp),
         color = ObsidianColors.SurfaceContainer.copy(alpha = 0.82f),
-        border = BorderStroke(1.dp, color.copy(alpha = 0.16f)),
-        shadowElevation = 10.dp
+        border = BorderStroke(1.dp, color.copy(alpha = 0.22f)),
+        shadowElevation = 8.dp
     ) {
         Column(
             modifier = Modifier
-                .clickable(interactionSource = interactionSource, indication = null, onClick = {})
+                .clickable(interactionSource = interactionSource, indication = LocalIndication.current, onClick = onClick)
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1912,76 +1993,626 @@ fun ReputationCard(label: String, value: String, color: Color, icon: ImageVector
             Box(
                 modifier = Modifier
                     .size(52.dp)
-                    .background(color.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
-                    .border(1.dp, color.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
-                    .shadow(12.dp, RoundedCornerShape(16.dp), ambientColor = color.copy(alpha = 0.24f), spotColor = color.copy(alpha = 0.24f)),
+                    .background(color.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
+                    .border(1.dp, color.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
+                    .shadow(8.dp, RoundedCornerShape(16.dp), ambientColor = color.copy(alpha = 0.18f), spotColor = color.copy(alpha = 0.18f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(icon, null, tint = color, modifier = Modifier.size(22.dp))
             }
             Text(label, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = color, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            Text(value, fontSize = 32.sp, fontWeight = FontWeight.Black, color = Color.White, textAlign = TextAlign.Center)
+            Text(value, fontSize = 32.sp, fontWeight = FontWeight.Black, color = color, textAlign = TextAlign.Center)
+        }
+    }
+}
+
+enum class ReputationKind {
+    Malicious,
+    Suspicious,
+    Clean
+}
+
+data class ReputationSheetState(
+    val kind: ReputationKind,
+    val title: String,
+    val description: String,
+    val recommendation: String,
+    val countLabel: String,
+    val countValue: Int,
+    val detailLabel: String,
+    val detailValue: String,
+    val accent: Color,
+    val icon: ImageVector,
+    val primaryButton: String,
+    val secondaryButton: String?
+)
+
+data class AiSummaryItem(
+    val icon: ImageVector,
+    val tint: Color,
+    val text: String
+)
+
+private object ScanResultVisuals {
+    val ScreenBase = Color(0xFF0B1220)
+    val ScreenBottom = Color(0xFF020617)
+    val TopBlueGlow = Color(0x1F3B82F6)
+    val TopLightGlow = Color(0x08FFFFFF)
+    val GlassSurface = Color(0x0AFFFFFF)
+    val GlassBorder = Color(0x14FFFFFF)
+    val GlassInnerLight = Color(0x08FFFFFF)
+    val GlassLowlight = Color(0x12000000)
+
+    val HighRiskStart = Color(0xFF7F1D1D)
+    val HighRiskEnd = Color(0xFFDC2626)
+    val HighRiskButtonStart = Color(0xFF991B1B)
+    val HighRiskButtonEnd = Color(0xFFEF4444)
+    val HighRiskBorder = Color(0x40FF5050)
+
+    val CautionStart = Color(0xFF3B2A00)
+    val CautionEnd = Color(0xFFD97706)
+    val CautionButtonStart = Color(0xFF92400E)
+    val CautionButtonEnd = Color(0xFFF59E0B)
+    val CautionBorder = Color(0x33F59E0B)
+
+    val SafeStart = Color(0xFF064E3B)
+    val SafeMid = Color(0xFF0B6B76)
+    val SafeEnd = Color(0xFF10B981)
+    val SafeButtonStart = Color(0xFF047857)
+    val SafeButtonEnd = Color(0xFF22C55E)
+    val SafeBorder = Color(0x3322C55E)
+}
+
+@Composable
+private fun AnalysisScreenBackdrop(modifier: Modifier = Modifier) {
+    Box(modifier = modifier.background(ScanResultVisuals.ScreenBase)) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            ScanResultVisuals.ScreenBase,
+                            Color(0xFF0D1728),
+                            ScanResultVisuals.ScreenBottom
+                        )
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(320.dp)
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(ScanResultVisuals.TopBlueGlow, Color.Transparent),
+                        radius = 700f
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp)
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(ScanResultVisuals.TopLightGlow, Color.Transparent)
+                    )
+                )
+        )
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.24f)
+                        )
+                    )
+                )
+        )
+    }
+}
+
+@Composable
+fun PremiumAnimatedSurface(
+    modifier: Modifier = Modifier,
+    delayMillis: Int = 0,
+    cornerRadius: Dp = 18.dp,
+    containerColor: Color = ScanResultVisuals.GlassSurface,
+    borderColor: Color = ScanResultVisuals.GlassBorder,
+    shadowElevation: Dp = 8.dp,
+    content: @Composable () -> Unit
+) {
+    var visible by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(durationMillis = 300, delayMillis = delayMillis, easing = FastOutSlowInEasing),
+        label = "premium_card_alpha"
+    )
+    val offsetY by animateDpAsState(
+        targetValue = if (visible) 0.dp else 14.dp,
+        animationSpec = tween(durationMillis = 300, delayMillis = delayMillis, easing = FastOutSlowInEasing),
+        label = "premium_card_offset"
+    )
+
+    LaunchedEffect(Unit) {
+        visible = true
+    }
+
+    Surface(
+        modifier = modifier
+            .offset(y = offsetY)
+            .graphicsLayer(alpha = alpha)
+            .shadow(
+                elevation = shadowElevation,
+                shape = RoundedCornerShape(cornerRadius),
+                ambientColor = Color.Black.copy(alpha = 0.20f),
+                spotColor = Color.Black.copy(alpha = 0.35f)
+            ),
+        shape = RoundedCornerShape(cornerRadius),
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor),
+        shadowElevation = 0.dp
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            ScanResultVisuals.GlassInnerLight,
+                            Color.Transparent,
+                            ScanResultVisuals.GlassLowlight
+                        )
+                    )
+                )
+        ) {
+            content()
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ReputationDetailSheet(
+    state: ReputationSheetState,
+    onDismiss: () -> Unit,
+    onGoBack: () -> Unit,
+    onContinue: () -> Unit,
+    onViewDetails: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = ObsidianColors.SurfaceContainer,
+        contentColor = Color.White,
+        dragHandle = {
+            Surface(
+                modifier = Modifier.padding(top = 10.dp),
+                shape = RoundedCornerShape(100.dp),
+                color = Color.White.copy(alpha = 0.14f)
+            ) {
+                Spacer(modifier = Modifier.width(42.dp).height(4.dp))
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 22.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .background(state.accent.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
+                        .border(1.dp, state.accent.copy(alpha = 0.2f), RoundedCornerShape(16.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(state.icon, null, tint = state.accent, modifier = Modifier.size(26.dp))
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(state.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(state.description, color = ObsidianColors.OnSurfaceVariant, fontSize = 14.sp, lineHeight = 20.sp)
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = ObsidianColors.SurfaceContainerLow.copy(alpha = 0.82f),
+                border = BorderStroke(1.dp, state.accent.copy(alpha = 0.16f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ReputationDetailRow(state.countLabel, state.countValue.toString())
+                    ReputationDetailRow(state.detailLabel, state.detailValue)
+                    ReputationDetailRow("Recommendation", state.recommendation)
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (state.kind == ReputationKind.Clean) {
+                    PressableGradientActionButton(
+                        text = state.primaryButton,
+                        icon = Icons.AutoMirrored.Filled.ArrowForward,
+                        brush = Brush.horizontalGradient(listOf(ObsidianColors.Safe, Color(0xFF5BE584))),
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onContinue
+                    )
+                } else {
+                    PressableGradientActionButton(
+                        text = state.primaryButton,
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        brush = when (state.kind) {
+                            ReputationKind.Malicious -> Brush.horizontalGradient(listOf(ObsidianColors.Error, ObsidianColors.ErrorDim))
+                            ReputationKind.Suspicious -> Brush.horizontalGradient(listOf(ObsidianColors.Warning, Color(0xFFFFB340)))
+                            ReputationKind.Clean -> Brush.horizontalGradient(listOf(ObsidianColors.Safe, Color(0xFF5BE584)))
+                        },
+                        modifier = Modifier.weight(1f),
+                        onClick = onGoBack
+                    )
+                    PressableOutlinedActionButton(
+                        text = state.secondaryButton ?: "Close",
+                        icon = if (state.kind == ReputationKind.Malicious) Icons.Default.Visibility else Icons.AutoMirrored.Filled.ArrowForward,
+                        modifier = Modifier.weight(1f),
+                        onClick = if (state.kind == ReputationKind.Malicious) onViewDetails else onContinue
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ReputationDetailRow(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label.uppercase(), color = ObsidianColors.OnSurfaceVariant, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text(value, color = Color.White, fontSize = 14.sp, lineHeight = 20.sp)
+    }
+}
+
+@Composable
+fun GlobalReputationOverviewCard(
+    maliciousCount: Int,
+    suspiciousCount: Int,
+    harmlessCount: Int,
+    onMaliciousClick: () -> Unit,
+    onSuspiciousClick: () -> Unit,
+    onCleanClick: () -> Unit
+) {
+    PremiumAnimatedSurface(
+        modifier = Modifier.fillMaxWidth(),
+        delayMillis = 140,
+        cornerRadius = 18.dp,
+        shadowElevation = 8.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ReputationMetricItem(
+                label = "Malicious",
+                value = maliciousCount,
+                icon = Icons.Default.WarningAmber,
+                accent = ObsidianColors.Error,
+                emphasize = maliciousCount > 0,
+                modifier = Modifier.weight(1f),
+                onClick = onMaliciousClick
+            )
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(54.dp)
+                    .background(Color.White.copy(alpha = 0.08f))
+            )
+            ReputationMetricItem(
+                label = "Suspicious",
+                value = suspiciousCount,
+                icon = Icons.Default.WarningAmber,
+                accent = ObsidianColors.Warning,
+                emphasize = suspiciousCount > 0,
+                modifier = Modifier.weight(1f),
+                onClick = onSuspiciousClick
+            )
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(54.dp)
+                    .background(Color.White.copy(alpha = 0.08f))
+            )
+            ReputationMetricItem(
+                label = "Clean",
+                value = harmlessCount,
+                icon = Icons.Default.Verified,
+                accent = ObsidianColors.Safe,
+                emphasize = harmlessCount > 0 && maliciousCount == 0 && suspiciousCount == 0,
+                modifier = Modifier.weight(1f),
+                onClick = onCleanClick
+            )
+        }
+    }
+}
+
+@Composable
+fun ReputationMetricItem(
+    label: String,
+    value: Int,
+    icon: ImageVector,
+    accent: Color,
+    emphasize: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(120), label = "reputation_metric_scale_$label")
+    val animatedValue by animateIntAsState(targetValue = value, animationSpec = tween(650, easing = FastOutSlowInEasing), label = "reputation_metric_value_$label")
+
+    Column(
+        modifier = modifier
+            .scale(scale)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(if (emphasize) accent.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.04f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, null, tint = accent, modifier = Modifier.size(17.dp))
+        }
+        Text(animatedValue.toString(), color = accent, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = Color.White.copy(alpha = 0.58f), fontSize = 11.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center)
+    }
+}
+
+@Composable
+fun SecuritySummaryCard(summaryItems: List<AiSummaryItem>) {
+    PremiumAnimatedSurface(
+        modifier = Modifier.fillMaxWidth(),
+        delayMillis = 220,
+        cornerRadius = 18.dp,
+        containerColor = Color(0x0DFFFFFF),
+        borderColor = Color(0x14FFFFFF),
+        shadowElevation = 8.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Psychology, null, tint = Color.White.copy(alpha = 0.76f), modifier = Modifier.size(16.dp))
+                    }
+                    Text("Threat Intelligence Summary", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            summaryItems.forEachIndexed { index, item ->
+                var visible by remember(item.text) { mutableStateOf(false) }
+                LaunchedEffect(item.text) {
+                    kotlinx.coroutines.delay(index * 80L)
+                    visible = true
+                }
+                AnimatedVisibility(
+                    visible = visible,
+                    enter = fadeIn(animationSpec = tween(220)) + slideInVertically(initialOffsetY = { it / 4 }, animationSpec = tween(220)),
+                    exit = fadeOut(animationSpec = tween(120))
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 1.dp)
+                                .size(22.dp)
+                                .background(item.tint.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(item.icon, null, tint = item.tint, modifier = Modifier.size(13.dp))
+                        }
+                        Text(item.text, color = Color.White.copy(alpha = 0.86f), fontSize = 14.sp, lineHeight = 20.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun StatusPrimaryActions(
+    modifier: Modifier = Modifier,
+    isUnsafe: Boolean,
+    primaryBrush: Brush,
+    primaryGlowColor: Color,
+    onPrimaryClick: () -> Unit,
+    onSecondaryClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val secondaryInteractionSource = remember { MutableInteractionSource() }
+    val primaryPressed by interactionSource.collectIsPressedAsState()
+    val secondaryPressed by secondaryInteractionSource.collectIsPressedAsState()
+    val primaryScale by animateFloatAsState(if (primaryPressed) 0.96f else 1f, tween(120), label = "status_primary_scale")
+    val secondaryScale by animateFloatAsState(if (secondaryPressed) 0.96f else 1f, tween(120), label = "status_secondary_scale")
+
+    Column(
+        modifier = modifier.padding(top = 4.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Button(
+            onClick = onPrimaryClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .scale(primaryScale)
+                .shadow(10.dp, RoundedCornerShape(14.dp), ambientColor = primaryGlowColor.copy(alpha = 0.12f), spotColor = Color.Black.copy(alpha = 0.20f))
+                .background(primaryBrush, RoundedCornerShape(14.dp)),
+            shape = RoundedCornerShape(14.dp),
+            interactionSource = interactionSource,
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = Color.White),
+            contentPadding = PaddingValues(horizontal = 18.dp),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp, pressedElevation = 0.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(if (isUnsafe) Icons.AutoMirrored.Filled.ArrowBack else Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(if (isUnsafe) "Go Back" else "Continue", fontWeight = FontWeight.Bold, color = Color.White)
+            }
+        }
+        OutlinedButton(
+            onClick = onSecondaryClick,
+            modifier = Modifier.fillMaxWidth().height(52.dp).scale(secondaryScale),
+            shape = RoundedCornerShape(14.dp),
+            interactionSource = secondaryInteractionSource,
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)),
+            colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White.copy(alpha = 0.02f), contentColor = Color.White.copy(alpha = 0.86f)),
+            contentPadding = PaddingValues(horizontal = 18.dp)
+        ) {
+            Icon(if (isUnsafe) Icons.AutoMirrored.Filled.ArrowForward else Icons.Default.Radar, null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(if (isUnsafe) "Continue Anyway" else "Scan Again", fontWeight = FontWeight.Bold)
         }
     }
 }
 
 @Composable
 fun PremiumVerdictCard(
-    verdict: String,
-    summary: String,
+    label: String,
+    title: String,
+    subtitle: String,
+    supportingText: String,
+    badgeText: String,
     verdictColor: Color,
-    verdictGradient: Brush,
     isDangerous: Boolean,
     isWarning: Boolean
 ) {
-    val headline = when {
-        isDangerous -> "Threat detected"
-        isWarning -> "Use caution"
-        else -> "SAFE"
+    val backgroundBrush = when {
+        isDangerous -> Brush.linearGradient(listOf(ScanResultVisuals.HighRiskStart, ScanResultVisuals.HighRiskEnd))
+        isWarning -> Brush.linearGradient(listOf(ScanResultVisuals.CautionStart, ScanResultVisuals.CautionEnd))
+        else -> Brush.linearGradient(listOf(ScanResultVisuals.SafeStart, ScanResultVisuals.SafeMid, ScanResultVisuals.SafeEnd))
     }
-    val shortMessage = when {
-        isDangerous -> "Risk markers found"
-        isWarning -> "Minor anomalies detected"
-        else -> "No major threats found"
+    val borderTint = when {
+        isDangerous -> ScanResultVisuals.HighRiskBorder
+        isWarning -> ScanResultVisuals.CautionBorder
+        else -> ScanResultVisuals.SafeBorder
+    }
+    var visible by remember { mutableStateOf(false) }
+    val alpha by animateFloatAsState(if (visible) 1f else 0f, tween(300, easing = FastOutSlowInEasing), label = "premium_verdict_alpha")
+    val offsetY by animateDpAsState(if (visible) 0.dp else 16.dp, tween(300, easing = FastOutSlowInEasing), label = "premium_verdict_offset")
+
+    LaunchedEffect(Unit) {
+        visible = true
     }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = ObsidianColors.SurfaceContainer.copy(alpha = 0.5f),
-        border = BorderStroke(1.dp, verdictColor.copy(alpha = 0.14f)),
-        shadowElevation = 14.dp
+        modifier = Modifier
+            .fillMaxWidth()
+            .offset(y = offsetY)
+            .graphicsLayer(alpha = alpha)
+            .shadow(12.dp, RoundedCornerShape(18.dp), ambientColor = Color.Black.copy(alpha = 0.18f), spotColor = Color.Black.copy(alpha = 0.28f)),
+        shape = RoundedCornerShape(18.dp),
+        color = Color.Transparent,
+        border = BorderStroke(1.dp, borderTint),
+        shadowElevation = 0.dp
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(verdictGradient)
-                .padding(20.dp)
+                .background(backgroundBrush, RoundedCornerShape(18.dp))
         ) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(112.dp)
-                    .background(Color.White.copy(alpha = 0.08f), CircleShape)
-                    .blur(8.dp)
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.10f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.08f)
+                            ),
+                            radius = 900f
+                        )
+                    )
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 18.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Box(
                     modifier = Modifier
-                        .size(58.dp)
-                        .background(Color.White.copy(alpha = 0.18f), RoundedCornerShape(18.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(18.dp)),
+                        .size(48.dp)
+                        .background(Color.White.copy(alpha = 0.12f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(if (isDangerous) Icons.Default.GppBad else if (isWarning) Icons.Default.GppMaybe else Icons.Default.Verified, null, tint = Color.White, modifier = Modifier.size(30.dp))
+                    Icon(
+                        if (isDangerous || isWarning) Icons.Default.WarningAmber else Icons.Default.CheckCircle,
+                        null,
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.weight(1f)) {
-                    Surface(color = Color.White.copy(alpha = 0.16f), shape = CircleShape) {
-                        Text(headline, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalAlignment = Alignment.Start
+                ) {
+                    Text(label, color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.4.sp)
+                    Text(title, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(subtitle, color = Color.White.copy(alpha = 0.86f), fontSize = 14.sp, lineHeight = 20.sp)
+                    if (supportingText.isNotBlank()) {
+                        Text(supportingText, color = Color.White.copy(alpha = 0.74f), fontSize = 13.sp, lineHeight = 18.sp)
                     }
-                    Text(verdict, fontSize = 28.sp, fontWeight = FontWeight.Black, color = Color.White)
-                    Text(shortMessage, color = Color.White.copy(alpha = 0.85f), fontWeight = FontWeight.SemiBold)
-                    Text(summary, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Surface(
+                        color = Color.White.copy(alpha = 0.12f),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
+                    ) {
+                        Text(
+                            text = badgeText,
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1989,84 +2620,229 @@ fun PremiumVerdictCard(
 }
 
 @Composable
-fun ConfidenceLevelCard(score: Int) {
+fun ConfidenceLevelCard(
+    flaggedEngines: Int,
+    totalEngines: Int,
+    title: String = "Risk Level",
+    riskLevel: String = "Low Risk",
+    accent: Color = ObsidianColors.Primary,
+    icon: ImageVector = Icons.Default.VerifiedUser
+) {
+    val clampedTotal = totalEngines.coerceAtLeast(0)
+    val clampedFlagged = flaggedEngines.coerceIn(0, clampedTotal.coerceAtLeast(1))
+    val progressTarget = if (clampedTotal == 0) 0f else clampedFlagged.toFloat() / clampedTotal.toFloat()
     val animatedProgress by animateFloatAsState(
-        targetValue = score.coerceIn(0, 100) / 100f,
-        animationSpec = tween(1000, easing = FastOutSlowInEasing),
-        label = "confidence_progress"
+        targetValue = progressTarget,
+        animationSpec = tween(700, easing = FastOutSlowInEasing),
+        label = "risk_score_progress"
     )
+    val animatedFlagged by animateIntAsState(targetValue = clampedFlagged, animationSpec = tween(700, easing = FastOutSlowInEasing), label = "risk_flagged_value")
 
-    Surface(
+    PremiumAnimatedSurface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(28.dp),
-        color = ObsidianColors.SurfaceContainer.copy(alpha = 0.74f),
-        border = BorderStroke(1.dp, ObsidianColors.Primary.copy(alpha = 0.14f)),
-        shadowElevation = 12.dp
+        delayMillis = 80,
+        cornerRadius = 18.dp,
+        shadowElevation = 8.dp
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
-            horizontalArrangement = Arrangement.spacedBy(18.dp),
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(92.dp)
-                    .background(ObsidianColors.SurfaceContainerLow.copy(alpha = 0.8f), CircleShape),
+                    .size(64.dp),
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(
                     progress = { animatedProgress },
                     modifier = Modifier.fillMaxSize(),
-                    strokeWidth = 8.dp,
-                    color = ObsidianColors.Primary,
-                    trackColor = ObsidianColors.SurfaceContainerHighest,
+                    strokeWidth = 6.dp,
+                    color = accent,
+                    trackColor = Color.White.copy(alpha = 0.08f),
                     strokeCap = StrokeCap.Round
                 )
-                Icon(Icons.Default.VerifiedUser, null, tint = ObsidianColors.Primary.copy(alpha = 0.95f), modifier = Modifier.size(28.dp))
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Confidence Level", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ObsidianColors.OnSurfaceVariant, letterSpacing = 1.1.sp)
-                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("$score", fontSize = 44.sp, fontWeight = FontWeight.Black, color = Color.White)
-                    Text("%", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = ObsidianColors.Primary.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 7.dp))
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .background(Color.White.copy(alpha = 0.05f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(icon, null, tint = accent, modifier = Modifier.size(20.dp))
                 }
-                Text("Animated confidence score derived from AI and reputation engines.", fontSize = 12.sp, color = ObsidianColors.OnSurfaceVariant)
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.62f), letterSpacing = 1.2.sp)
+                Text(riskLevel, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White, lineHeight = 28.sp)
+                Text("Flagged by $animatedFlagged of $clampedTotal engines", fontSize = 13.sp, color = Color.White.copy(alpha = 0.76f))
             }
         }
     }
 }
 
 @Composable
-fun CleanStatusCard(title: String, subtitle: String, accent: Color) {
+fun SafeStatusCard(title: String, subtitle: String, accent: Color) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(16.dp),
         color = ObsidianColors.SurfaceContainerHigh.copy(alpha = 0.58f),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.14f)),
-        shadowElevation = 10.dp
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.16f)),
+        shadowElevation = 6.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Brush.horizontalGradient(listOf(Color.Transparent, accent.copy(alpha = 0.06f))))
-                .padding(18.dp),
+                .padding(horizontal = 18.dp, vertical = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(46.dp)
-                    .background(accent.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
-                    .border(1.dp, accent.copy(alpha = 0.14f), RoundedCornerShape(16.dp)),
+                    .size(42.dp)
+                    .background(accent.copy(alpha = 0.14f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.TaskAlt, null, tint = accent, modifier = Modifier.size(24.dp))
+                Icon(Icons.Default.Verified, null, tint = accent, modifier = Modifier.size(20.dp))
             }
-            Column {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                Text(subtitle, color = ObsidianColors.OnSurfaceVariant, fontSize = 12.sp)
+                Text(subtitle, color = Color.White.copy(alpha = 0.78f), fontSize = 13.sp)
             }
         }
+    }
+}
+
+@Composable
+fun PremiumUnsafeActionSection(
+    modifier: Modifier = Modifier,
+    primaryBrush: Brush,
+    onGoBack: () -> Unit,
+    onContinue: () -> Unit
+) {
+    Row(
+        modifier = modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PremiumRecommendedActionButton(
+                text = "Go Back",
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                brush = primaryBrush,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onGoBack
+            )
+            Spacer(modifier = Modifier.height(18.dp))
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PremiumRiskActionButton(
+                text = "Continue Anyway",
+                icon = Icons.AutoMirrored.Filled.ArrowForward,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onContinue
+            )
+            Text(
+                text = "Proceed at your own risk",
+                color = Color(0xFFCBD5F5).copy(alpha = 0.72f),
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                modifier = Modifier.padding(start = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun PremiumRecommendedActionButton(
+    text: String,
+    icon: ImageVector,
+    brush: Brush,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(120), label = "premium_recommended_action_scale")
+
+    Button(
+        onClick = onClick,
+        modifier = modifier
+            .height(52.dp)
+            .scale(scale)
+            .shadow(
+                elevation = 2.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color.Black.copy(alpha = 0.04f),
+                spotColor = Color.Black.copy(alpha = 0.05f)
+            )
+            .background(brush, RoundedCornerShape(12.dp)),
+        shape = RoundedCornerShape(12.dp),
+        interactionSource = interactionSource,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = Color.White),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = 1.dp,
+            pressedElevation = 0.dp,
+            focusedElevation = 1.dp,
+            hoveredElevation = 1.dp,
+            disabledElevation = 0.dp
+        )
+    ) {
+        Icon(icon, null, modifier = Modifier.size(18.dp), tint = Color.White)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+    }
+}
+
+@Composable
+fun PremiumRiskActionButton(
+    text: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(120), label = "premium_risk_action_scale")
+
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier
+            .height(52.dp)
+            .scale(scale)
+            .shadow(
+                elevation = 1.dp,
+                shape = RoundedCornerShape(12.dp),
+                ambientColor = Color.Black.copy(alpha = 0.03f),
+                spotColor = Color.Black.copy(alpha = 0.04f)
+            )
+            .background(Color(0xFF1E293B), RoundedCornerShape(12.dp)),
+        shape = RoundedCornerShape(12.dp),
+        interactionSource = interactionSource,
+        border = BorderStroke(1.dp, Color(0xFF475569)),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Color.Transparent,
+            contentColor = Color(0xFFCBD5F5)
+        ),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = 0.dp,
+            pressedElevation = 0.dp,
+            focusedElevation = 0.dp,
+            hoveredElevation = 0.dp,
+            disabledElevation = 0.dp
+        )
+    ) {
+        Icon(icon, null, modifier = Modifier.size(18.dp), tint = Color(0xFFCBD5F5))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text, fontWeight = FontWeight.Bold, color = Color(0xFFCBD5F5), maxLines = 1)
     }
 }
 
@@ -2079,22 +2855,30 @@ fun PressableOutlinedActionButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(120), label = "outlined_action_scale")
+    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(120), label = "outlined_action_scale")
 
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.height(58.dp).scale(scale),
-        shape = CircleShape,
+        modifier = modifier.height(50.dp).scale(scale),
+        shape = RoundedCornerShape(12.dp),
         interactionSource = interactionSource,
-        border = BorderStroke(1.5.dp, ObsidianColors.Primary.copy(alpha = 0.25f)),
+        border = BorderStroke(1.5.dp, Color(0xFF7F93A8).copy(alpha = 0.65f)),
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
         colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = ObsidianColors.SurfaceContainer.copy(alpha = 0.45f),
-            contentColor = Color.White
+            containerColor = Color.Transparent,
+            contentColor = Color.White.copy(alpha = 0.9f)
+        ),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = 0.dp,
+            pressedElevation = 0.dp,
+            focusedElevation = 0.dp,
+            hoveredElevation = 0.dp,
+            disabledElevation = 0.dp
         )
     ) {
         Icon(icon, null, modifier = Modifier.size(18.dp))
         Spacer(modifier = Modifier.width(8.dp))
-        Text(text, fontWeight = FontWeight.Bold)
+        Text(text, fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 
@@ -2108,19 +2892,29 @@ fun PressableGradientActionButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(120), label = "gradient_action_scale")
+    val scale by animateFloatAsState(if (pressed) 0.96f else 1f, tween(120), label = "gradient_action_scale")
 
     Button(
         onClick = onClick,
-        modifier = modifier.height(58.dp).scale(scale).clip(CircleShape).background(brush),
-        shape = CircleShape,
+        modifier = modifier
+            .height(50.dp)
+            .scale(scale)
+            .background(brush, RoundedCornerShape(12.dp)),
+        shape = RoundedCornerShape(12.dp),
         interactionSource = interactionSource,
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 0.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = Color.White)
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent, contentColor = Color.White),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = 4.dp,
+            pressedElevation = 2.dp,
+            focusedElevation = 4.dp,
+            hoveredElevation = 5.dp,
+            disabledElevation = 0.dp
+        )
     ) {
-        Text(text, fontWeight = FontWeight.Bold, color = Color.White)
-        Spacer(modifier = Modifier.width(8.dp))
         Icon(icon, null, modifier = Modifier.size(18.dp), tint = Color.White)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text, fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
     }
 }
 
@@ -2685,116 +3479,70 @@ fun SettingsScreenObsidian(navController: NavController) {
             )
         },
         bottomBar = { OKBottomNav(navController) },
-        containerColor = ObsidianColors.Background
+        containerColor = ScanResultVisuals.ScreenBase
     ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color(0xFF0B1220),
-                            Color(0xFF0E1524),
-                            Color(0xFF111827)
-                        )
-                    )
-                )
         ) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                Color(0xFF22D3EE).copy(alpha = 0.12f),
-                                Color.Transparent
-                            ),
-                            center = androidx.compose.ui.geometry.Offset(180f, 120f),
-                            radius = 420f
-                        )
-                    )
-            )
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                Color(0xFFA78BFA).copy(alpha = 0.1f),
-                                Color.Transparent
-                            ),
-                            center = androidx.compose.ui.geometry.Offset(880f, 540f),
-                            radius = 520f
-                        )
-                    )
-            )
-
+            AnalysisScreenBackdrop(modifier = Modifier.matchParentSize())
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
                     .padding(horizontal = 20.dp),
-                contentPadding = PaddingValues(top = 28.dp, bottom = 36.dp),
-                verticalArrangement = Arrangement.spacedBy(22.dp)
+                contentPadding = PaddingValues(top = 4.dp, bottom = 36.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
                 item {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(
+                        modifier = Modifier.padding(top = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
                         Text("Settings", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Text(
-                            "Manage protection, privacy, and app behavior with a premium security control center.",
-                            color = Color(0xFF9CA3AF),
+                            "Manage protection, privacy, and application behavior from a focused security control panel.",
+                            color = Color.White.copy(alpha = 0.65f),
                             fontSize = 15.sp,
-                            lineHeight = 22.sp
+                            lineHeight = 22.sp,
+                            modifier = Modifier.widthIn(max = 320.dp)
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
                 }
 
                 item {
                     AnimatedVisibility(visible = clearDataMessage != null, enter = fadeIn(), exit = fadeOut()) {
-                        Surface(
-                            color = Color.Transparent,
-                            shape = RoundedCornerShape(20.dp),
-                            tonalElevation = 0.dp,
-                            shadowElevation = 10.dp,
-                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
-                            modifier = Modifier.fillMaxWidth()
+                        PremiumAnimatedSurface(
+                            modifier = Modifier.fillMaxWidth(),
+                            cornerRadius = 20.dp,
+                            shadowElevation = 8.dp
                         ) {
-                            Box(
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .background(
-                                        Brush.linearGradient(
-                                            listOf(
-                                                Color.White.copy(alpha = 0.05f),
-                                                ObsidianColors.Safe.copy(alpha = 0.08f),
-                                                Color.Transparent
-                                            )
-                                        )
-                                    )
+                                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 18.dp, vertical = 16.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    SettingsGradientIconBox(icon = Icons.Default.Check, accent = ObsidianColors.Safe)
-                                    Text(clearDataMessage.orEmpty(), color = Color.White, fontWeight = FontWeight.Medium, fontSize = 15.sp)
-                                }
+                                SettingsIconBox(icon = Icons.Default.Check, accent = ObsidianColors.Safe)
+                                Text(clearDataMessage.orEmpty(), color = Color.White, fontWeight = FontWeight.Medium, fontSize = 15.sp)
                             }
                         }
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Security Settings", icon = Icons.Default.Security) {
+                    SettingsSectionLabel("SECURITY")
+                    SettingsSectionCard {
                         SettingsToggleRow(
                             title = "Safe Browsing",
                             description = "Warn before potentially dangerous pages load.",
                             icon = Icons.Default.TravelExplore,
                             checked = safeBrowsing,
-                            onCheckedChange = { safeBrowsing = it }
+                            onCheckedChange = { safeBrowsing = it },
+                            accentColor = ObsidianColors.Safe,
+                            switchOnColor = Color(0xFF22C55E)
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2802,7 +3550,11 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Prevent access to flagged phishing and malware destinations.",
                             icon = Icons.Default.Block,
                             checked = blockMaliciousSites,
-                            onCheckedChange = { blockMaliciousSites = it }
+                            onCheckedChange = { blockMaliciousSites = it },
+                            accentColor = Color(0xFFEF4444),
+                            switchOnColor = Color(0xFF22C55E),
+                            recommended = true,
+                            warningWhenDisabled = "Turning this off may expose you to threats"
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2810,18 +3562,21 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Surface immediate alerts when suspicious activity is detected.",
                             icon = Icons.Default.NotificationImportant,
                             checked = threatAlerts,
-                            onCheckedChange = { threatAlerts = it }
+                            onCheckedChange = { threatAlerts = it },
+                            accentColor = ObsidianColors.Warning,
+                            switchOnColor = ObsidianColors.Warning
                         )
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Privacy", icon = Icons.Default.PrivacyTip) {
+                    SettingsSectionLabel("PRIVACY")
+                    SettingsSectionCard {
                         SettingsActionRow(
                             title = "Clear Browsing Data",
                             description = "Delete cached pages, session traces, and temporary site data.",
                             icon = Icons.Default.DeleteSweep,
-                            accentColor = ObsidianColors.Error,
+                            accentColor = Color(0xFF60A5FA),
                             onClick = {
                                 clearDataMessage = null
                                 showClearDataDialog = true
@@ -2833,7 +3588,9 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Reduce local browsing traces for private sessions.",
                             icon = Icons.Default.VisibilityOff,
                             checked = incognitoMode,
-                            onCheckedChange = { incognitoMode = it }
+                            onCheckedChange = { incognitoMode = it },
+                            accentColor = Color(0xFF60A5FA),
+                            switchOnColor = Color(0xFF3B82F6)
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2841,19 +3598,24 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Request that supported websites limit tracking behavior.",
                             icon = Icons.Default.GppGood,
                             checked = doNotTrack,
-                            onCheckedChange = { doNotTrack = it }
+                            onCheckedChange = { doNotTrack = it },
+                            accentColor = Color(0xFF60A5FA),
+                            switchOnColor = Color(0xFF3B82F6)
                         )
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "App Settings", icon = Icons.Default.Tune) {
+                    SettingsSectionLabel("APP SETTINGS")
+                    SettingsSectionCard {
                         SettingsToggleRow(
                             title = "Dark Mode",
                             description = "Keep the interface optimized for low-light use.",
                             icon = Icons.Default.DarkMode,
                             checked = darkMode,
-                            onCheckedChange = { darkMode = it }
+                            onCheckedChange = { darkMode = it },
+                            accentColor = Color(0xFF60A5FA),
+                            switchOnColor = Color(0xFF3B82F6)
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2861,7 +3623,9 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Continuously inspect active browsing sessions for risk.",
                             icon = Icons.Default.GppMaybe,
                             checked = realTimeProtection,
-                            onCheckedChange = { realTimeProtection = it }
+                            onCheckedChange = { realTimeProtection = it },
+                            accentColor = ObsidianColors.Safe,
+                            switchOnColor = Color(0xFF22C55E)
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2869,7 +3633,9 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Refresh reputation intelligence and detection rules automatically.",
                             icon = Icons.Default.SystemUpdateAlt,
                             checked = autoUpdateDatabase,
-                            onCheckedChange = { autoUpdateDatabase = it }
+                            onCheckedChange = { autoUpdateDatabase = it },
+                            accentColor = Color(0xFF60A5FA),
+                            switchOnColor = Color(0xFF3B82F6)
                         )
                         SettingsDivider()
                         SettingsToggleRow(
@@ -2877,17 +3643,21 @@ fun SettingsScreenObsidian(navController: NavController) {
                             description = "Receive app updates and security event notifications.",
                             icon = Icons.Default.NotificationsActive,
                             checked = notificationsEnabled,
-                            onCheckedChange = { notificationsEnabled = it }
+                            onCheckedChange = { notificationsEnabled = it },
+                            accentColor = ObsidianColors.Warning,
+                            switchOnColor = ObsidianColors.Warning
                         )
                     }
                 }
 
                 item {
-                    SettingsSectionCard(title = "Info", icon = Icons.Default.Info) {
+                    SettingsSectionLabel("INFO")
+                    SettingsSectionCard {
                         SettingsInfoRow(
                             title = "App Version",
                             value = appVersion,
                             icon = Icons.Default.Info,
+                            accentColor = Color(0xFF60A5FA),
                             showChevron = false,
                             onClick = {}
                         )
@@ -2896,6 +3666,7 @@ fun SettingsScreenObsidian(navController: NavController) {
                             title = "Privacy Policy",
                             value = "Review how data is handled",
                             icon = Icons.Default.Policy,
+                            accentColor = Color(0xFF60A5FA),
                             onClick = { showPrivacyPolicyDialog = true }
                         )
                         SettingsDivider()
@@ -2903,6 +3674,7 @@ fun SettingsScreenObsidian(navController: NavController) {
                             title = "Terms & Conditions",
                             value = "Usage terms and responsibilities",
                             icon = Icons.Default.Description,
+                            accentColor = Color(0xFF60A5FA),
                             onClick = { showTermsDialog = true }
                         )
                         SettingsDivider()
@@ -2910,6 +3682,7 @@ fun SettingsScreenObsidian(navController: NavController) {
                             title = "About App",
                             value = "Product overview and purpose",
                             icon = Icons.Default.Info,
+                            accentColor = Color(0xFF60A5FA),
                             onClick = { showAboutDialog = true }
                         )
                     }
@@ -2920,90 +3693,50 @@ fun SettingsScreenObsidian(navController: NavController) {
 }
 
 @Composable
-fun SettingsSectionCard(title: String, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
+fun SettingsSectionLabel(text: String) {
+    Text(
+        text = text,
+        color = Color.White.copy(alpha = 0.46f),
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 1.4.sp,
+        modifier = Modifier.padding(top = 4.dp)
+    )
+}
+
+@Composable
+fun SettingsSectionCard(content: @Composable ColumnScope.() -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(140), label = "settings_section_scale")
+
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = Color.Transparent,
+        modifier = Modifier.fillMaxWidth().scale(scale),
+        color = Color(0x0DFFFFFF),
         shape = RoundedCornerShape(20.dp),
         tonalElevation = 0.dp,
         shadowElevation = 10.dp,
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f))
     ) {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    Brush.linearGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.05f),
-                            Color.White.copy(alpha = 0.03f),
-                            Color.Transparent
-                        )
-                    )
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                content = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    ) {
-                        SettingsGradientIconBox(icon = icon)
-                        Text(title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 19.sp)
-                    }
-                    content()
-                }
-            )
-        }
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+            content = content
+        )
     }
 }
 
 @Composable
-fun SettingsGradientIconBox(icon: ImageVector, accent: Color = ObsidianColors.Primary) {
+fun SettingsIconBox(icon: ImageVector, accent: Color = ObsidianColors.Primary) {
     Box(
-        modifier = Modifier.size(44.dp),
+        modifier = Modifier
+            .size(40.dp)
+            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(14.dp)),
         contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .background(accent.copy(alpha = 0.12f), CircleShape)
-                .blur(10.dp)
-        )
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .background(Color.White.copy(alpha = 0.04f), RoundedCornerShape(14.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.07f), RoundedCornerShape(14.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                icon,
-                null,
-                modifier = Modifier
-                    .size(20.dp)
-                    .graphicsLayer(alpha = 0.99f)
-                    .drawWithCache {
-                        onDrawWithContent {
-                            drawContent()
-                            drawRect(
-                                Brush.linearGradient(
-                                    listOf(
-                                        Color(0xFF22D3EE),
-                                        Color(0xFFA78BFA)
-                                    )
-                                ),
-                                blendMode = androidx.compose.ui.graphics.BlendMode.SrcAtop
-                            )
-                        }
-                    }
-            )
-        }
+        Icon(icon, null, tint = accent, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -3013,70 +3746,115 @@ fun SettingsToggleRow(
     description: String,
     icon: ImageVector,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    accentColor: Color,
+    switchOnColor: Color,
+    recommended: Boolean = false,
+    warningWhenDisabled: String? = null
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val rowScale by animateFloatAsState(if (pressed) 0.995f else 1f, tween(140), label = "settings_toggle_row_scale")
+    val rowScale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(140), label = "settings_toggle_row_scale")
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .scale(rowScale)
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable(interactionSource = interactionSource, indication = null) { onCheckedChange(!checked) }
-            .padding(vertical = 12.dp),
+            .padding(vertical = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        SettingsGradientIconBox(icon = icon, accent = if (checked) Color(0xFF22D3EE) else ObsidianColors.OnSurfaceVariant)
+        SettingsIconBox(icon = icon, accent = accentColor)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
-            Text(description, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (recommended) {
+                    Surface(
+                        modifier = Modifier
+                            .wrapContentWidth()
+                            .widthIn(min = 80.dp),
+                        color = Color(0x2622C55E),
+                        shape = RoundedCornerShape(999.dp),
+                        border = BorderStroke(1.dp, Color(0x3322C55E))
+                    ) {
+                        Text(
+                            "Recommended",
+                            color = Color(0xFF22C55E),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+            Text(description, color = Color.White.copy(alpha = 0.65f), fontSize = 14.sp, lineHeight = 20.sp)
+            if (!checked && warningWhenDisabled != null) {
+                Text(warningWhenDisabled, color = ObsidianColors.Warning, fontSize = 12.sp, lineHeight = 18.sp)
+            }
         }
-        PremiumSettingsSwitch(checked = checked, onCheckedChange = onCheckedChange)
+        PremiumSettingsSwitch(checked = checked, onCheckedChange = onCheckedChange, activeColor = switchOnColor)
     }
 }
 
 @Composable
-fun PremiumSettingsSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+fun PremiumSettingsSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, activeColor: Color) {
     val interactionSource = remember { MutableInteractionSource() }
-    val thumbOffset by animateFloatAsState(if (checked) 20f else 0f, tween(180), label = "premium_switch_offset")
-    val glowAlpha by animateFloatAsState(if (checked) 0.22f else 0f, tween(180), label = "premium_switch_glow")
+    val thumbOffset by animateDpAsState(if (checked) 20.dp else 0.dp, tween(200, easing = FastOutSlowInEasing), label = "premium_switch_offset")
+    val trackColor by animateColorAsState(
+        targetValue = if (checked) activeColor else Color.White.copy(alpha = 0.20f),
+        animationSpec = tween(200, easing = FastOutSlowInEasing),
+        label = "premium_switch_track"
+    )
+    val thumbColor by animateColorAsState(
+        targetValue = if (checked) Color.White else Color(0xFF9CA3AF),
+        animationSpec = tween(200, easing = FastOutSlowInEasing),
+        label = "premium_switch_thumb"
+    )
 
     Box(
         modifier = Modifier
-            .size(width = 50.dp, height = 30.dp)
+            .size(width = 52.dp, height = 32.dp)
             .clip(RoundedCornerShape(100.dp))
             .clickable(interactionSource = interactionSource, indication = null) { onCheckedChange(!checked) }
     ) {
         Box(
             modifier = Modifier
                 .matchParentSize()
+                .shadow(
+                    elevation = if (checked) 8.dp else 0.dp,
+                    shape = RoundedCornerShape(100.dp),
+                    ambientColor = activeColor.copy(alpha = if (checked) 0.24f else 0f),
+                    spotColor = activeColor.copy(alpha = if (checked) 0.16f else 0f)
+                )
                 .background(
-                    if (checked) {
-                        Brush.horizontalGradient(listOf(Color(0xFF22D3EE), Color(0xFF3B82F6)))
-                    } else {
-                        Brush.horizontalGradient(listOf(Color(0xFF374151), Color(0xFF374151)))
-                    },
+                    Brush.horizontalGradient(listOf(trackColor, trackColor)),
                     RoundedCornerShape(100.dp)
                 )
-                .border(1.dp, Color.White.copy(alpha = if (checked) 0.14f else 0.06f), RoundedCornerShape(100.dp))
+                .border(1.dp, Color.White.copy(alpha = if (checked) 0.10f else 0.08f), RoundedCornerShape(100.dp))
         )
-        if (checked) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(Color(0xFF22D3EE).copy(alpha = glowAlpha), RoundedCornerShape(100.dp))
-                    .blur(8.dp)
-            )
-        }
         Box(
             modifier = Modifier
                 .padding(start = 4.dp, top = 4.dp)
-                .offset(x = thumbOffset.dp)
+                .offset(x = thumbOffset)
                 .size(22.dp)
-                .background(Color.White, CircleShape)
+                .background(thumbColor, CircleShape)
         )
     }
 }
@@ -3091,7 +3869,7 @@ fun SettingsActionRow(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.985f else 1f, tween(120), label = "settings_action_scale")
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(120), label = "settings_action_scale")
 
     Row(
         modifier = Modifier
@@ -3099,16 +3877,16 @@ fun SettingsActionRow(
             .scale(scale)
             .clip(RoundedCornerShape(18.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(vertical = 12.dp),
+            .padding(vertical = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        SettingsGradientIconBox(icon = icon, accent = accentColor)
+        SettingsIconBox(icon = icon, accent = accentColor)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
-            Text(description, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
+            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(description, color = Color.White.copy(alpha = 0.65f), fontSize = 14.sp, lineHeight = 20.sp)
         }
-        Icon(Icons.Default.ChevronRight, null, tint = Color(0xFF9CA3AF))
+        Icon(Icons.Default.ChevronRight, null, tint = Color.White.copy(alpha = 0.42f))
     }
 }
 
@@ -3117,12 +3895,13 @@ fun SettingsInfoRow(
     title: String,
     value: String,
     icon: ImageVector,
+    accentColor: Color,
     showChevron: Boolean = true,
     onClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.99f else 1f, tween(120), label = "settings_info_scale")
+    val scale by animateFloatAsState(if (pressed) 0.98f else 1f, tween(120), label = "settings_info_scale")
 
     Row(
         modifier = Modifier
@@ -3130,17 +3909,17 @@ fun SettingsInfoRow(
             .scale(scale)
             .clip(RoundedCornerShape(18.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
-            .padding(vertical = 12.dp),
+            .padding(vertical = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        SettingsGradientIconBox(icon = icon)
+        SettingsIconBox(icon = icon, accent = accentColor)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 17.sp)
-            Text(value, color = Color(0xFF9CA3AF), fontSize = 14.sp, lineHeight = 20.sp)
+            Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text(value, color = Color.White.copy(alpha = 0.65f), fontSize = 14.sp, lineHeight = 20.sp)
         }
         if (showChevron) {
-            Icon(Icons.Default.ChevronRight, null, tint = Color(0xFF9CA3AF))
+            Icon(Icons.Default.ChevronRight, null, tint = Color.White.copy(alpha = 0.42f))
         }
     }
 }
@@ -3375,12 +4154,30 @@ data class BottomNavDestination(
 
 private fun navigateBackOrHome(navController: NavController) {
     if (!navController.popBackStack()) {
+        navigateHomeSafely(navController)
+    }
+}
+
+private fun navigateHomeSafely(navController: NavController) {
+    navController.navigate("home") {
+        popUpTo(navController.graph.findStartDestination().id) {
+            saveState = true
+        }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+private fun navigateHomeForNewScan(navController: NavController) {
+    runCatching {
+        navController.getBackStackEntry("home").savedStateHandle["focus_url_input"] = true
+        navigateHomeSafely(navController)
+    }.getOrElse {
         navController.navigate("home") {
             popUpTo(navController.graph.findStartDestination().id) {
-                saveState = true
+                inclusive = false
             }
             launchSingleTop = true
-            restoreState = true
         }
     }
 }
@@ -3407,7 +4204,7 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
     var blockedError by remember { mutableStateOf<String?>(null) }
     val secureConnection = currentUrl.startsWith("https://")
     val displayHost = remember(currentUrl) {
-        val parsed = Uri.parse(currentUrl)
+        val parsed = currentUrl.toUri()
         parsed.host ?: currentUrl.removePrefix("https://").removePrefix("http://")
     }
 
@@ -3564,12 +4361,6 @@ fun WebViewScreenObsidian(navController: NavController, url: String) {
                                                         }
                                                     }
                                                 }
-                                            }
-
-                                            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                                                super.onReceivedError(view, errorCode, description, failingUrl)
-                                                blockedError = description ?: "ERR_NAME_NOT_RESOLVED"
-                                                pendingUrl = failingUrl ?: pendingUrl
                                             }
                                         }
                                         loadUrl(url)
